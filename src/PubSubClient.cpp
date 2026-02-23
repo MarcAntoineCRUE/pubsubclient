@@ -195,6 +195,7 @@ boolean PubSubClient::connect(const char *id, const char *user, const char *pass
 
         if (result == 1) {
             nextMsgId = 1;
+            clearPendingMessages();
             // Leave room in the buffer for header and variable length field
             uint16_t length = MQTT_MAX_HEADER_SIZE;
             unsigned int j;
@@ -339,8 +340,8 @@ uint32_t PubSubClient::readPacket(uint8_t* lengthLength) {
         if(!readByte(this->buffer, &len)) return 0;
         skip = (this->buffer[*lengthLength+1]<<8)+this->buffer[*lengthLength+2];
         start = 2;
-        if (this->buffer[0]&MQTTQOS1) {
-            // skip message id
+        if (this->buffer[0]&0x06) {
+            // skip message id for QoS > 0
             skip += 2;
         }
     }
@@ -398,23 +399,76 @@ boolean PubSubClient::loop() {
                         memmove(this->buffer+llen+2,this->buffer+llen+3,tl); /* move topic inside buffer 1 byte to front */
                         this->buffer[llen+2+tl] = 0; /* end the topic as a 'C' string with \x00 */
                         char *topic = (char*) this->buffer+llen+2;
-                        // msgId only present for QOS>0
-                        if ((this->buffer[0]&0x06) == MQTTQOS1) {
+                        uint8_t qos = (this->buffer[0] & 0x06) >> 1;
+                        if (qos == 1) {
+                            // QoS 1: deliver immediately, send PUBACK
                             msgId = (this->buffer[llen+3+tl]<<8)+this->buffer[llen+3+tl+1];
                             payload = this->buffer+llen+3+tl+2;
                             callback(topic,payload,len-llen-3-tl-2);
 
-                            this->buffer[0] = MQTTPUBACK;
-                            this->buffer[1] = 2;
-                            this->buffer[2] = (msgId >> 8);
-                            this->buffer[3] = (msgId & 0xFF);
-                            _client->write(this->buffer,4);
+                            sendSimplePacket(MQTTPUBACK, msgId);
+                            lastOutActivity = t;
+
+                        } else if (qos == 2) {
+                            // QoS 2: send PUBREC, deliver on PUBREL
+                            msgId = (this->buffer[llen+3+tl]<<8)+this->buffer[llen+3+tl+1];
+                            int8_t slot = findPendingSlot(msgId);
+                            if (slot < 0) {
+                                // New message - deliver to callback
+                                payload = this->buffer+llen+3+tl+2;
+                                callback(topic,payload,len-llen-3-tl-2);
+                                // Track for PUBREL handshake
+                                slot = findFreeSlot();
+                                if (slot >= 0) {
+                                    pendingMessages[slot].msgId = msgId;
+                                    pendingMessages[slot].state = MQTT_QOS_STATE_WAIT_PUBREL;
+                                }
+                            }
+                            // Send PUBREC (also for duplicates)
+                            sendSimplePacket(MQTTPUBREC, msgId);
                             lastOutActivity = t;
 
                         } else {
+                            // QoS 0
                             payload = this->buffer+llen+3+tl;
                             callback(topic,payload,len-llen-3-tl);
                         }
+                    }
+                } else if (type == MQTTPUBACK) {
+                    // QoS 1 publish acknowledged
+                    msgId = (this->buffer[llen+1]<<8)+this->buffer[llen+2];
+                    int8_t slot = findPendingSlot(msgId);
+                    if (slot >= 0) {
+                        pendingMessages[slot].state = MQTT_QOS_STATE_FREE;
+                        pendingMessages[slot].msgId = 0;
+                    }
+                } else if (type == MQTTPUBREC) {
+                    // QoS 2 outgoing: received PUBREC, send PUBREL
+                    msgId = (this->buffer[llen+1]<<8)+this->buffer[llen+2];
+                    int8_t slot = findPendingSlot(msgId);
+                    if (slot >= 0) {
+                        pendingMessages[slot].state = MQTT_QOS_STATE_WAIT_PUBCOMP;
+                    }
+                    // PUBREL requires reserved bits 0010 per MQTT spec
+                    sendSimplePacket(MQTTPUBREL | MQTTQOS1, msgId);
+                    lastOutActivity = t;
+                } else if (type == MQTTPUBREL) {
+                    // QoS 2 incoming: received PUBREL, send PUBCOMP
+                    msgId = (this->buffer[llen+1]<<8)+this->buffer[llen+2];
+                    int8_t slot = findPendingSlot(msgId);
+                    if (slot >= 0) {
+                        pendingMessages[slot].state = MQTT_QOS_STATE_FREE;
+                        pendingMessages[slot].msgId = 0;
+                    }
+                    sendSimplePacket(MQTTPUBCOMP, msgId);
+                    lastOutActivity = t;
+                } else if (type == MQTTPUBCOMP) {
+                    // QoS 2 outgoing: publish complete
+                    msgId = (this->buffer[llen+1]<<8)+this->buffer[llen+2];
+                    int8_t slot = findPendingSlot(msgId);
+                    if (slot >= 0) {
+                        pendingMessages[slot].state = MQTT_QOS_STATE_FREE;
+                        pendingMessages[slot].msgId = 0;
                     }
                 } else if (type == MQTTPINGREQ) {
                     this->buffer[0] = MQTTPINGRESP;
@@ -443,6 +497,63 @@ boolean PubSubClient::publish(const char* topic, const char* payload, boolean re
 
 boolean PubSubClient::publish(const char* topic, const uint8_t* payload, unsigned int plength) {
     return publish(topic, payload, plength, false);
+}
+
+boolean PubSubClient::publish(const char* topic, const char* payload, boolean retained, uint8_t qos) {
+    return publish(topic,(const uint8_t*)payload, payload ? strnlen(payload, this->bufferSize) : 0, retained, qos);
+}
+
+boolean PubSubClient::publish(const char* topic, const uint8_t* payload, unsigned int plength, boolean retained, uint8_t qos) {
+    if (connected()) {
+        if (qos > 2) return false;
+
+        uint16_t msgIdLen = (qos > 0) ? 2 : 0;
+        if (this->bufferSize < MQTT_MAX_HEADER_SIZE + 2 + strnlen(topic, this->bufferSize) + msgIdLen + plength) {
+            // Too long
+            return false;
+        }
+        // Leave room in the buffer for header and variable length field
+        uint16_t length = MQTT_MAX_HEADER_SIZE;
+        length = writeString(topic,this->buffer,length);
+
+        uint16_t currentMsgId = 0;
+        if (qos > 0) {
+            currentMsgId = nextMsgId++;
+            if (nextMsgId == 0) nextMsgId = 1;
+            this->buffer[length++] = (currentMsgId >> 8);
+            this->buffer[length++] = (currentMsgId & 0xFF);
+        }
+
+        // Add payload
+        uint16_t i;
+        for (i=0;i<plength;i++) {
+            this->buffer[length++] = payload[i];
+        }
+
+        // Write the header
+        uint8_t header = MQTTPUBLISH;
+        if (retained) header |= 1;
+        if (qos == 1) header |= MQTTQOS1;
+        else if (qos == 2) header |= MQTTQOS2;
+
+        boolean result = write(header,this->buffer,length-MQTT_MAX_HEADER_SIZE);
+
+        // Track in-flight QoS 1/2 messages
+        if (result && qos > 0) {
+            int8_t slot = findFreeSlot();
+            if (slot >= 0) {
+                pendingMessages[slot].msgId = currentMsgId;
+                if (qos == 1) {
+                    pendingMessages[slot].state = MQTT_QOS_STATE_WAIT_PUBACK;
+                } else {
+                    pendingMessages[slot].state = MQTT_QOS_STATE_WAIT_PUBREC;
+                }
+            }
+        }
+
+        return result;
+    }
+    return false;
 }
 
 boolean PubSubClient::publish(const char* topic, const uint8_t* payload, unsigned int plength, boolean retained) {
@@ -611,7 +722,7 @@ boolean PubSubClient::subscribe(const char* topic, uint8_t qos) {
     if (topic == 0) {
         return false;
     }
-    if (qos > 1) {
+    if (qos > 2) {
         return false;
     }
     if (this->bufferSize < 9 + topicLength) {
@@ -665,6 +776,7 @@ void PubSubClient::disconnect() {
     _client->flush();
     _client->stop();
     lastInActivity = lastOutActivity = millis();
+    clearPendingMessages();
 }
 
 uint16_t PubSubClient::writeString(const char* string, uint8_t* buf, uint16_t pos) {
@@ -766,4 +878,39 @@ PubSubClient& PubSubClient::setKeepAlive(uint16_t keepAlive) {
 PubSubClient& PubSubClient::setSocketTimeout(uint16_t timeout) {
     this->socketTimeout = timeout;
     return *this;
+}
+
+boolean PubSubClient::sendSimplePacket(uint8_t type, uint16_t msgId) {
+    this->buffer[0] = type;
+    this->buffer[1] = 2;
+    this->buffer[2] = (msgId >> 8);
+    this->buffer[3] = (msgId & 0xFF);
+    uint16_t rc = _client->write(this->buffer, 4);
+    lastOutActivity = millis();
+    return (rc == 4);
+}
+
+int8_t PubSubClient::findPendingSlot(uint16_t msgId) {
+    for (uint8_t i = 0; i < MQTT_MAX_QOS_PENDING; i++) {
+        if (pendingMessages[i].msgId == msgId && pendingMessages[i].state != MQTT_QOS_STATE_FREE) {
+            return (int8_t)i;
+        }
+    }
+    return -1;
+}
+
+int8_t PubSubClient::findFreeSlot() {
+    for (uint8_t i = 0; i < MQTT_MAX_QOS_PENDING; i++) {
+        if (pendingMessages[i].state == MQTT_QOS_STATE_FREE) {
+            return (int8_t)i;
+        }
+    }
+    return -1;
+}
+
+void PubSubClient::clearPendingMessages() {
+    for (uint8_t i = 0; i < MQTT_MAX_QOS_PENDING; i++) {
+        pendingMessages[i].state = MQTT_QOS_STATE_FREE;
+        pendingMessages[i].msgId = 0;
+    }
 }

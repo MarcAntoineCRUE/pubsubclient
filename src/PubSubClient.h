@@ -76,6 +76,23 @@
 // Maximum size of fixed header and variable length size header
 #define MQTT_MAX_HEADER_SIZE 5
 
+// QoS message tracking states (for in-flight QoS 1/2 messages)
+#define MQTT_QOS_STATE_FREE          0
+#define MQTT_QOS_STATE_WAIT_PUBACK   1  // Outgoing QoS 1: waiting for PUBACK
+#define MQTT_QOS_STATE_WAIT_PUBREC   2  // Outgoing QoS 2: waiting for PUBREC
+#define MQTT_QOS_STATE_WAIT_PUBCOMP  3  // Outgoing QoS 2: sent PUBREL, waiting for PUBCOMP
+#define MQTT_QOS_STATE_WAIT_PUBREL   4  // Incoming QoS 2: sent PUBREC, waiting for PUBREL
+
+// MQTT_MAX_QOS_PENDING : Maximum number of simultaneous in-flight QoS 1/2 messages
+#ifndef MQTT_MAX_QOS_PENDING
+#define MQTT_MAX_QOS_PENDING 8
+#endif
+
+struct PendingQoSMessage {
+    uint16_t msgId;
+    uint8_t state;
+};
+
 #if defined(ESP8266) || defined(ESP32)
 #include <functional>
 #define MQTT_CALLBACK_SIGNATURE std::function<void(char*, uint8_t*, unsigned int)> callback
@@ -97,11 +114,16 @@ private:
    unsigned long lastInActivity;
    bool pingOutstanding;
    MQTT_CALLBACK_SIGNATURE;
+   PendingQoSMessage pendingMessages[MQTT_MAX_QOS_PENDING];
    uint32_t readPacket(uint8_t*);
    boolean readByte(uint8_t * result);
    boolean readByte(uint8_t * result, uint16_t * index);
    boolean write(uint8_t header, uint8_t* buf, uint16_t length);
    uint16_t writeString(const char* string, uint8_t* buf, uint16_t pos);
+   boolean sendSimplePacket(uint8_t type, uint16_t msgId);
+   int8_t findPendingSlot(uint16_t msgId);
+   int8_t findFreeSlot();
+   void clearPendingMessages();
    // Build up the header ready to send
    // Returns the size of the header
    // Note: the header is built at the end of the first MQTT_MAX_HEADER_SIZE bytes, so will start
@@ -152,6 +174,9 @@ public:
    boolean publish(const char* topic, const char* payload, boolean retained);
    boolean publish(const char* topic, const uint8_t * payload, unsigned int plength);
    boolean publish(const char* topic, const uint8_t * payload, unsigned int plength, boolean retained);
+   // Publish with explicit QoS level (0, 1, or 2)
+   boolean publish(const char* topic, const char* payload, boolean retained, uint8_t qos);
+   boolean publish(const char* topic, const uint8_t * payload, unsigned int plength, boolean retained, uint8_t qos);
    boolean publish_P(const char* topic, const char* payload, boolean retained);
    boolean publish_P(const char* topic, const uint8_t * payload, unsigned int plength, boolean retained);
    // Start to publish a message.
