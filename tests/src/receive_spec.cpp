@@ -117,7 +117,6 @@ int test_receive_max_sized_message() {
     byte publish[] = {0x30, (byte)remlen, 0x0, 0x5, 0x74, 0x6f, 0x70, 0x69, 0x63, 0x70, 0x61, 0x79, 0x6c, 0x6f, 0x61, 0x64};
     byte bigPublish[length];
     memset(bigPublish,'A',length);
-    bigPublish[length] = 'B';
     memcpy(bigPublish,publish,16);
     shimClient.respond(bigPublish,length);
 
@@ -157,7 +156,6 @@ int test_receive_oversized_message() {
     byte publish[] = {0x30, (byte)remlen, 0x0, 0x5, 0x74, 0x6f, 0x70, 0x69, 0x63, 0x70, 0x61, 0x79, 0x6c, 0x6f, 0x61, 0x64};
     byte bigPublish[length];
     memset(bigPublish,'A',length);
-    bigPublish[length] = 'B';
     memcpy(bigPublish,publish,16);
     shimClient.respond(bigPublish,length);
 
@@ -222,7 +220,6 @@ int test_resize_buffer() {
     byte publish[] = {0x30, (byte)remlen, 0x0, 0x5, 0x74, 0x6f, 0x70, 0x69, 0x63, 0x70, 0x61, 0x79, 0x6c, 0x6f, 0x61, 0x64};
     byte bigPublish[length];
     memset(bigPublish,'A',length);
-    bigPublish[length] = 'B';
     memcpy(bigPublish,publish,16);
     // Send it twice
     shimClient.respond(bigPublish,length);
@@ -277,7 +274,6 @@ int test_receive_oversized_stream_message() {
 
     byte bigPublish[length];
     memset(bigPublish,'A',length);
-    bigPublish[length] = 'B';
     memcpy(bigPublish,publish,16);
 
     shimClient.respond(bigPublish,length);

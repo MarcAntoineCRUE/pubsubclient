@@ -383,9 +383,9 @@ uint32_t PubSubClient::readPacket(uint8_t* lengthLength) {
             }
             idx++;
         }
-        if (idx > this->bufferSize) {
-            len = 0; // oversized — discard
-        }
+        // For the stream path we do NOT discard the packet when idx exceeds bufferSize:
+        // the header and as much payload as fits are already in the buffer, and the
+        // overflow bytes were forwarded to the Stream. loop() will deliver both.
     }
     return len;
 }

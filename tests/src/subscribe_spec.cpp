@@ -87,7 +87,8 @@ int test_subscribe_invalid_qos() {
     int rc = client.connect((char*)"client_test1");
     IS_TRUE(rc);
 
-    rc = client.subscribe((char*)"topic",2);
+    // QoS 0, 1, 2 are valid per the MQTT spec; QoS 3 and above are not
+    rc = client.subscribe((char*)"topic",3);
     IS_FALSE(rc);
     rc = client.subscribe((char*)"topic",254);
     IS_FALSE(rc);
