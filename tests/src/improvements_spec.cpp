@@ -1,14 +1,15 @@
+
 /*
  * improvements_spec.cpp
  *
- * Tests pour les améliorations de la librairie PubSubClient :
+ * Tests for PubSubClient library improvements:
  *  - QoS 1 publish (packet format + PUBACK handling)
  *  - QoS 2 publish (full PUBREC→PUBREL→PUBCOMP handshake)
  *  - QoS 1 receive (PUBLISH → PUBACK)
  *  - QoS 2 receive (PUBLISH → PUBREC → PUBREL → PUBCOMP)
- *  - Robustesse : QoS invalide, buffer trop petit, willQos invalide
- *  - Vérification des valeurs des macros de paquets
- *  - Vérification de l'état initial (init())
+ *  - Robustness: invalid QoS, buffer too small, invalid willQos
+ *  - Macro value verification
+ *  - Initial state verification (init())
  */
 
 #include "PubSubClient.h"
