@@ -14,11 +14,17 @@
 
 #define MQTT_VERSION_3_1      3
 #define MQTT_VERSION_3_1_1    4
+#define MQTT_VERSION_5        5
 
 // MQTT_VERSION : Pick the version
 //#define MQTT_VERSION MQTT_VERSION_3_1
 #ifndef MQTT_VERSION
 #define MQTT_VERSION MQTT_VERSION_3_1_1
+#endif
+
+// MQTT_ENABLE_V5 : Set to 0 to strip all MQTT 5 code at compile time (saves flash/RAM on 3.1.1-only builds)
+#ifndef MQTT_ENABLE_V5
+#define MQTT_ENABLE_V5 1
 #endif
 
 // MQTT_MAX_PACKET_SIZE : Maximum packet size. Override with setBufferSize().
@@ -127,6 +133,26 @@ private:
    int8_t findFreeSlot();
    void clearPendingMessages();
    void init(); // common constructor initialisation
+   // --- Step 2: Variable Byte Integer helpers ---
+   uint8_t  encodeVariableByteInteger(uint32_t value, uint8_t* buf);
+   uint32_t decodeVariableByteInteger(const uint8_t* buf, uint8_t* bytesUsed);
+#if MQTT_ENABLE_V5
+   // --- Step 3: Property encoding/decoding helpers ---
+   uint16_t writePropertyU8(uint8_t id, uint8_t value,        uint8_t* buf, uint16_t pos);
+   uint16_t writePropertyU16(uint8_t id, uint16_t value,       uint8_t* buf, uint16_t pos);
+   uint16_t writePropertyU32(uint8_t id, uint32_t value,       uint8_t* buf, uint16_t pos);
+   uint16_t writePropertyStr(uint8_t id, const char* str,      uint8_t* buf, uint16_t pos);
+   uint16_t writePropertyBin(uint8_t id, const uint8_t* data, uint16_t len, uint8_t* buf, uint16_t pos);
+   uint16_t writePropertyVBI(uint8_t id, uint32_t value,       uint8_t* buf, uint16_t pos);
+   // Advance pos past entire properties section (length VBI + bytes)
+   uint16_t skipProperties(const uint8_t* buf, uint16_t pos);
+   // Advance pos past a single property's value (used internally by findProperty)
+   uint16_t skipPropertyValue(uint8_t propId, const uint8_t* buf, uint16_t pos);
+   // Find a property by id; sets *valueOut to the start of its value, *valueLenOut to its encoded byte size
+   bool     findProperty(const uint8_t* buf, uint16_t propsPayloadStart, uint16_t propsPayloadEnd,
+                         uint8_t id, const uint8_t** valueOut, uint16_t* valueLenOut);
+   uint8_t  _mqttVersion; // runtime-selected protocol version (1, 4, or 5)
+#endif // MQTT_ENABLE_V5
    // Build up the header ready to send
    // Returns the size of the header
    // Note: the header is built at the end of the first MQTT_MAX_HEADER_SIZE bytes, so will start
@@ -163,6 +189,12 @@ public:
    PubSubClient& setStream(Stream& stream);
    PubSubClient& setKeepAlive(uint16_t keepAlive);
    PubSubClient& setSocketTimeout(uint16_t timeout);
+#if MQTT_ENABLE_V5
+   // Set/get the MQTT protocol version used for the next connect() call.
+   // Accepted values: MQTT_VERSION_3_1 (3), MQTT_VERSION_3_1_1 (4), MQTT_VERSION_5 (5)
+   PubSubClient& setMqttVersion(uint8_t version);
+   uint8_t       getMqttVersion() const;
+#endif // MQTT_ENABLE_V5
 
    boolean setBufferSize(uint16_t size);
    uint16_t getBufferSize();

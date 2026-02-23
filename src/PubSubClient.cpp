@@ -28,6 +28,9 @@ void PubSubClient::init() {
     setKeepAlive(MQTT_KEEPALIVE);
     setSocketTimeout(MQTT_SOCKET_TIMEOUT);
     clearPendingMessages();
+#if MQTT_ENABLE_V5
+    this->_mqttVersion = MQTT_VERSION; // can be overridden with setMqttVersion()
+#endif
 }
 
 PubSubClient::PubSubClient() { init(); }
@@ -116,15 +119,21 @@ boolean PubSubClient::connect(const char *id, const char *user, const char *pass
             uint16_t length = MQTT_MAX_HEADER_SIZE;
             unsigned int j;
 
-#if MQTT_VERSION == MQTT_VERSION_3_1
-            uint8_t d[9] = {0x00,0x06,'M','Q','I','s','d','p', MQTT_VERSION};
-#define MQTT_HEADER_VERSION_LENGTH 9
-#elif MQTT_VERSION == MQTT_VERSION_3_1_1
-            uint8_t d[7] = {0x00,0x04,'M','Q','T','T',MQTT_VERSION};
-#define MQTT_HEADER_VERSION_LENGTH 7
+#if MQTT_ENABLE_V5
+            if (_mqttVersion == MQTT_VERSION_5) {
+                // MQTT 5 protocol name + level
+                uint8_t d[7] = {0x00,0x04,'M','Q','T','T', 0x05};
+                for (uint8_t k = 0; k < 7; k++) this->buffer[length++] = d[k];
+            } else
 #endif
-            for (j = 0;j<MQTT_HEADER_VERSION_LENGTH;j++) {
-                this->buffer[length++] = d[j];
+            {
+#if MQTT_VERSION == MQTT_VERSION_3_1
+                uint8_t d[9] = {0x00,0x06,'M','Q','I','s','d','p', MQTT_VERSION};
+                for (uint8_t k = 0; k < 9; k++) this->buffer[length++] = d[k];
+#else
+                uint8_t d[7] = {0x00,0x04,'M','Q','T','T', MQTT_VERSION};
+                for (uint8_t k = 0; k < 7; k++) this->buffer[length++] = d[k];
+#endif
             }
 
             uint8_t v;
@@ -149,12 +158,26 @@ boolean PubSubClient::connect(const char *id, const char *user, const char *pass
             this->buffer[length++] = ((this->keepAlive) >> 8);
             this->buffer[length++] = ((this->keepAlive) & 0xFF);
 
+#if MQTT_ENABLE_V5
+            if (_mqttVersion == MQTT_VERSION_5) {
+                // Connect Properties (empty — expanded in later steps)
+                this->buffer[length++] = 0x00; // Property Length = 0
+            }
+#endif
+
             CHECK_STRING_LENGTH(length,id)
             length = writeString(id,this->buffer,length);
             if (willTopic) {
+#if MQTT_ENABLE_V5
+                if (_mqttVersion == MQTT_VERSION_5) {
+                    // Will Properties (empty — expanded in later steps)
+                    this->buffer[length++] = 0x00; // Will Property Length = 0
+                }
+#endif
                 CHECK_STRING_LENGTH(length,willTopic)
                 length = writeString(willTopic,this->buffer,length);
                 CHECK_STRING_LENGTH(length,willMessage)
+                // In MQTT 5 the Will Payload is binary (same 2-byte length prefix as UTF-8 string)
                 length = writeString(willMessage,this->buffer,length);
             }
 
@@ -183,6 +206,20 @@ boolean PubSubClient::connect(const char *id, const char *user, const char *pass
             uint8_t llen;
             uint32_t len = readPacket(&llen);
 
+#if MQTT_ENABLE_V5
+            if (_mqttVersion == MQTT_VERSION_5) {
+                // MQTT 5 CONNACK: [type][remLen][sessionPresent][reasonCode][propsLen...]
+                // Minimum packet size is 5 bytes (remLen=3, sessionPresent+reasonCode+propLen=3)
+                if (len >= 5 && buffer[3] == 0x00) {
+                    lastInActivity = millis();
+                    pingOutstanding = false;
+                    _state = MQTT_CONNECTED;
+                    return true;
+                } else if (len >= 5) {
+                    _state = (int8_t)buffer[3]; // store reason code (fits for codes 0x01-0x7F)
+                }
+            } else
+#endif
             if (len == 4) {
                 if (buffer[3] == 0) {
                     lastInActivity = millis();
@@ -254,25 +291,25 @@ uint32_t PubSubClient::readPacket(uint8_t* lengthLength) {
     uint16_t len = 0;
     if(!readByte(this->buffer, &len)) return 0;
     bool isPublish = (this->buffer[0]&0xF0) == MQTTPUBLISH;
-    uint32_t multiplier = 1;
-    uint32_t length = 0;
     uint8_t digit = 0;
     uint16_t skip = 0;
     uint32_t start = 0;
 
+    // Read remaining length (Variable Byte Integer) into buffer
     do {
         if (len == 5) {
-            // Invalid remaining length encoding - kill the connection
+            // Invalid remaining length encoding — kill the connection
             _state = MQTT_DISCONNECTED;
             _client->stop();
             return 0;
         }
-        if(!readByte(&digit)) return 0;
+        if (!readByte(&digit)) return 0;
         this->buffer[len++] = digit;
-        length += (digit & 127) * multiplier;
-        multiplier <<=7; //multiplier *= 128
-    } while ((digit & 128) != 0);
-    *lengthLength = len-1;
+    } while ((digit & 0x80) != 0);
+    // Decode the VBI from the buffer bytes that were just read
+    uint8_t vbiBytes;
+    uint32_t length = decodeVariableByteInteger(this->buffer + 1, &vbiBytes);
+    *lengthLength = vbiBytes; // number of VBI bytes = old (len - 1)
 
     if (isPublish) {
         // Read in topic length to calculate bytes to skip over for Stream writing
@@ -582,26 +619,12 @@ size_t PubSubClient::write(const uint8_t *buffer, size_t size) {
 
 size_t PubSubClient::buildHeader(uint8_t header, uint8_t* buf, uint16_t length) {
     uint8_t lenBuf[4];
-    uint8_t llen = 0;
-    uint8_t digit;
-    uint8_t pos = 0;
-    uint16_t len = length;
-    do {
-
-        digit = len  & 127; //digit = len %128
-        len >>= 7; //len = len / 128
-        if (len > 0) {
-            digit |= 0x80;
-        }
-        lenBuf[pos++] = digit;
-        llen++;
-    } while(len>0);
-
-    buf[4-llen] = header;
-    for (int i=0;i<llen;i++) {
-        buf[MQTT_MAX_HEADER_SIZE-llen+i] = lenBuf[i];
+    uint8_t llen = encodeVariableByteInteger(length, lenBuf);
+    buf[4 - llen] = header;
+    for (uint8_t i = 0; i < llen; i++) {
+        buf[MQTT_MAX_HEADER_SIZE - llen + i] = lenBuf[i];
     }
-    return llen+1; // Full header size is variable length bit plus the 1-byte fixed header
+    return llen + 1; // Full header size is variable length bits plus the 1-byte fixed header
 }
 
 boolean PubSubClient::write(uint8_t header, uint8_t* buf, uint16_t length) {
@@ -823,3 +846,194 @@ void PubSubClient::clearPendingMessages() {
         pendingMessages[i].msgId = 0;
     }
 }
+
+// -----------------------------------------------------------------------
+// Step 2: Variable Byte Integer encode / decode
+// -----------------------------------------------------------------------
+
+// Encode 'value' as a MQTT Variable Byte Integer into buf[0..3].
+// Returns the number of bytes written (1-4).
+uint8_t PubSubClient::encodeVariableByteInteger(uint32_t value, uint8_t* buf) {
+    uint8_t len = 0;
+    do {
+        uint8_t digit = value & 0x7F;
+        value >>= 7;
+        if (value > 0) digit |= 0x80;
+        buf[len++] = digit;
+    } while (value > 0);
+    return len;
+}
+
+// Decode a Variable Byte Integer from buf.
+// *bytesUsed is set to the number of bytes consumed (1-4).
+uint32_t PubSubClient::decodeVariableByteInteger(const uint8_t* buf, uint8_t* bytesUsed) {
+    uint32_t value = 0;
+    uint32_t multiplier = 1;
+    uint8_t pos = 0;
+    uint8_t digit;
+    do {
+        digit = buf[pos++];
+        value += (uint32_t)(digit & 0x7F) * multiplier;
+        multiplier <<= 7;
+    } while ((digit & 0x80) != 0 && pos < 4);
+    *bytesUsed = pos;
+    return value;
+}
+
+#if MQTT_ENABLE_V5
+
+// -----------------------------------------------------------------------
+// Step 1: setMqttVersion / getMqttVersion
+// -----------------------------------------------------------------------
+PubSubClient& PubSubClient::setMqttVersion(uint8_t version) {
+    this->_mqttVersion = version;
+    return *this;
+}
+
+uint8_t PubSubClient::getMqttVersion() const {
+    return this->_mqttVersion;
+}
+
+// -----------------------------------------------------------------------
+// Step 3: Property write helpers
+// All helpers write directly into buf[] at pos and return the new pos.
+// They silently skip writing if there is insufficient space.
+// -----------------------------------------------------------------------
+
+uint16_t PubSubClient::writePropertyU8(uint8_t id, uint8_t value, uint8_t* buf, uint16_t pos) {
+    if (pos + 2 > this->bufferSize) return pos;
+    buf[pos++] = id;
+    buf[pos++] = value;
+    return pos;
+}
+
+uint16_t PubSubClient::writePropertyU16(uint8_t id, uint16_t value, uint8_t* buf, uint16_t pos) {
+    if (pos + 3 > this->bufferSize) return pos;
+    buf[pos++] = id;
+    buf[pos++] = (value >> 8);
+    buf[pos++] = (value & 0xFF);
+    return pos;
+}
+
+uint16_t PubSubClient::writePropertyU32(uint8_t id, uint32_t value, uint8_t* buf, uint16_t pos) {
+    if (pos + 5 > this->bufferSize) return pos;
+    buf[pos++] = id;
+    buf[pos++] = (uint8_t)(value >> 24);
+    buf[pos++] = (uint8_t)(value >> 16);
+    buf[pos++] = (uint8_t)(value >> 8);
+    buf[pos++] = (uint8_t)(value & 0xFF);
+    return pos;
+}
+
+uint16_t PubSubClient::writePropertyStr(uint8_t id, const char* str, uint8_t* buf, uint16_t pos) {
+    uint16_t slen = (uint16_t)strlen(str);
+    if (pos + 3u + slen > this->bufferSize) return pos;
+    buf[pos++] = id;
+    buf[pos++] = (slen >> 8);
+    buf[pos++] = (slen & 0xFF);
+    memcpy(buf + pos, str, slen);
+    return pos + slen;
+}
+
+uint16_t PubSubClient::writePropertyBin(uint8_t id, const uint8_t* data, uint16_t len,
+                                         uint8_t* buf, uint16_t pos) {
+    if (pos + 3u + len > this->bufferSize) return pos;
+    buf[pos++] = id;
+    buf[pos++] = (len >> 8);
+    buf[pos++] = (len & 0xFF);
+    memcpy(buf + pos, data, len);
+    return pos + len;
+}
+
+uint16_t PubSubClient::writePropertyVBI(uint8_t id, uint32_t value, uint8_t* buf, uint16_t pos) {
+    uint8_t vbi[4];
+    uint8_t vlen = encodeVariableByteInteger(value, vbi);
+    if (pos + 1u + vlen > this->bufferSize) return pos;
+    buf[pos++] = id;
+    memcpy(buf + pos, vbi, vlen);
+    return pos + vlen;
+}
+
+// -----------------------------------------------------------------------
+// Step 3: Property read helpers
+// -----------------------------------------------------------------------
+
+// Advance pos past a single property value.
+// Returns the position immediately after the value; returns pos unchanged
+// for unknown property IDs (caller should treat as end-of-properties).
+uint16_t PubSubClient::skipPropertyValue(uint8_t propId, const uint8_t* buf, uint16_t pos) {
+    switch (propId) {
+        // --- 1-byte (Byte) properties ---
+        case 0x01: case 0x17: case 0x19: case 0x24:
+        case 0x25: case 0x28: case 0x29: case 0x2A:
+            return pos + 1;
+        // --- 2-byte (Two Byte Integer) properties ---
+        case 0x13: case 0x21: case 0x22: case 0x23:
+            return pos + 2;
+        // --- 4-byte (Four Byte Integer) properties ---
+        case 0x02: case 0x11: case 0x18: case 0x27:
+            return pos + 4;
+        // --- Variable Byte Integer ---
+        case 0x0B: {
+            uint8_t used;
+            decodeVariableByteInteger(buf + pos, &used);
+            return pos + used;
+        }
+        // --- UTF-8 String and Binary Data (2-byte length prefix) ---
+        case 0x03: case 0x08: case 0x09: case 0x12:
+        case 0x15: case 0x16: case 0x1A: case 0x1C: case 0x1F: {
+            uint16_t slen = ((uint16_t)buf[pos] << 8) | buf[pos + 1];
+            return pos + 2 + slen;
+        }
+        // --- UTF-8 String Pair (User Property) ---
+        case 0x26: {
+            uint16_t len1 = ((uint16_t)buf[pos] << 8) | buf[pos + 1];
+            uint16_t after = pos + 2 + len1;
+            uint16_t len2 = ((uint16_t)buf[after] << 8) | buf[after + 1];
+            return after + 2 + len2;
+        }
+        default:
+            // Unknown property ID: cannot safely advance. Return pos unchanged
+            // so the caller can detect the stall and stop scanning.
+            return pos;
+    }
+}
+
+// Advance pos past an entire properties section:
+//   pos points to the VBI property-length field.
+// Returns position immediately after the whole section.
+uint16_t PubSubClient::skipProperties(const uint8_t* buf, uint16_t pos) {
+    uint8_t vbiBytes;
+    uint32_t propLen = decodeVariableByteInteger(buf + pos, &vbiBytes);
+    return pos + vbiBytes + (uint16_t)propLen;
+}
+
+// Scan a properties section for a specific property ID.
+//   buf            : packet buffer
+//   propsPayloadStart : position of the first property identifier byte (after the VBI length)
+//   propsPayloadEnd   : position just past the last byte of the properties section
+//   id             : the property identifier to search for
+//   valueOut       : if non-NULL, set to the start of the property value
+//   valueLenOut    : if non-NULL, set to the encoded byte length of the value
+// Returns true if found.
+bool PubSubClient::findProperty(const uint8_t* buf,
+                                 uint16_t propsPayloadStart, uint16_t propsPayloadEnd,
+                                 uint8_t id,
+                                 const uint8_t** valueOut, uint16_t* valueLenOut) {
+    uint16_t pos = propsPayloadStart;
+    while (pos < propsPayloadEnd) {
+        uint8_t propId = buf[pos++];
+        uint16_t valueStart = pos;
+        uint16_t after = skipPropertyValue(propId, buf, pos);
+        if (after == pos) break; // unknown id — cannot advance safely, stop
+        if (propId == id) {
+            if (valueOut)    *valueOut    = buf + valueStart;
+            if (valueLenOut) *valueLenOut = after - valueStart;
+            return true;
+        }
+        pos = after;
+    }
+    return false;
+}
+
+#endif // MQTT_ENABLE_V5
