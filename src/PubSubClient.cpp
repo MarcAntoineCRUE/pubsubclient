@@ -30,6 +30,8 @@ void PubSubClient::init() {
     clearPendingMessages();
 #if MQTT_ENABLE_V5
     this->_mqttVersion = MQTT_VERSION; // can be overridden with setMqttVersion()
+    this->_v5ServerReceiveMax = 65535; // MQTT 5 spec default
+    this->_v5ServerKeepalive  = 0;     // 0 = unset (use client keepAlive)
 #endif
 }
 
@@ -208,15 +210,40 @@ boolean PubSubClient::connect(const char *id, const char *user, const char *pass
 
 #if MQTT_ENABLE_V5
             if (_mqttVersion == MQTT_VERSION_5) {
-                // MQTT 5 CONNACK: [type][remLen][sessionPresent][reasonCode][propsLen...]
-                // Minimum packet size is 5 bytes (remLen=3, sessionPresent+reasonCode+propLen=3)
-                if (len >= 5 && buffer[3] == 0x00) {
+                // MQTT 5 CONNACK: [type][remLenVBI][sessionPresent][reasonCode][propsVBI...]
+                // llen = number of VBI bytes for remaining length (typically 1)
+                // Minimum: 5 bytes total (type + 1VBI + session_present + reason + 1props_VBI)
+                uint16_t minLen = (uint16_t)(llen + 4); // type(1)+VBI(llen)+session(1)+reason(1)+propsLen(1)
+                if (len >= minLen && buffer[llen + 2] == 0x00) {
+                    // Success — parse properties to extract Server Keep Alive & Receive Maximum
+                    uint16_t propsVBIStart = (uint16_t)(llen + 3);
+                    if (propsVBIStart < len) {
+                        uint8_t vbiBytes;
+                        uint32_t propsLen = decodeVariableByteInteger(buffer + propsVBIStart, &vbiBytes);
+                        uint16_t propsPStart = propsVBIStart + vbiBytes;
+                        uint16_t propsPEnd   = propsPStart + (uint16_t)propsLen;
+                        if (propsPEnd <= len) {
+                            const uint8_t* propVal;
+                            uint16_t propValLen;
+                            if (findProperty(buffer, propsPStart, propsPEnd,
+                                             MQTT_PROP_SERVER_KEEP_ALIVE, &propVal, &propValLen)) {
+                                uint16_t ska = ((uint16_t)propVal[0] << 8) | propVal[1];
+                                this->keepAlive = ska;
+                                this->_v5ServerKeepalive = ska;
+                            }
+                            if (findProperty(buffer, propsPStart, propsPEnd,
+                                             MQTT_PROP_RECEIVE_MAXIMUM, &propVal, &propValLen)) {
+                                uint16_t rm = ((uint16_t)propVal[0] << 8) | propVal[1];
+                                this->_v5ServerReceiveMax = rm;
+                            }
+                        }
+                    }
                     lastInActivity = millis();
                     pingOutstanding = false;
                     _state = MQTT_CONNECTED;
                     return true;
-                } else if (len >= 5) {
-                    _state = (int8_t)buffer[3]; // store reason code (fits for codes 0x01-0x7F)
+                } else if (len >= minLen) {
+                    _state = (int8_t)buffer[llen + 2]; // store reason code
                 }
             } else
 #endif
@@ -390,43 +417,54 @@ boolean PubSubClient::loop() {
                 uint8_t type = this->buffer[0]&0xF0;
                 if (type == MQTTPUBLISH) {
                     if (callback) {
-                        uint16_t tl = (this->buffer[llen+1]<<8)+this->buffer[llen+2]; /* topic length in bytes */
-                        memmove(this->buffer+llen+2,this->buffer+llen+3,tl); /* move topic inside buffer 1 byte to front */
-                        this->buffer[llen+2+tl] = 0; /* end the topic as a 'C' string with \x00 */
-                        char *topic = (char*) this->buffer+llen+2;
+                        uint16_t tl = (this->buffer[llen+1]<<8)+this->buffer[llen+2];
+                        memmove(this->buffer+llen+2, this->buffer+llen+3, tl);
+                        this->buffer[llen+2+tl] = 0;
+                        char *topic = (char*)this->buffer+llen+2;
                         uint8_t qos = (this->buffer[0] & 0x06) >> 1;
-                        if (qos == 1) {
-                            // QoS 1: deliver immediately, send PUBACK
-                            msgId = (this->buffer[llen+3+tl]<<8)+this->buffer[llen+3+tl+1];
-                            payload = this->buffer+llen+3+tl+2;
-                            callback(topic,payload,len-llen-3-tl-2);
 
-                            sendSimplePacket(MQTTPUBACK, msgId);
-                            lastOutActivity = t;
-
-                        } else if (qos == 2) {
-                            // QoS 2: send PUBREC, deliver on PUBREL
-                            msgId = (this->buffer[llen+3+tl]<<8)+this->buffer[llen+3+tl+1];
-                            int8_t slot = findPendingSlot(msgId);
-                            if (slot < 0) {
-                                // New message - deliver to callback
-                                payload = this->buffer+llen+3+tl+2;
-                                callback(topic,payload,len-llen-3-tl-2);
-                                // Track for PUBREL handshake
-                                slot = findFreeSlot();
-                                if (slot >= 0) {
-                                    pendingMessages[slot].msgId = msgId;
-                                    pendingMessages[slot].state = MQTT_QOS_STATE_WAIT_PUBREL;
-                                }
+                        if (qos == 1 || qos == 2) {
+                            // QoS 1 or 2: msgId immediately after topic null-terminator
+                            msgId = ((uint16_t)this->buffer[llen+3+tl] << 8) + this->buffer[llen+4+tl];
+                            uint16_t afterHdr = (uint16_t)(llen + 5 + tl);
+#if MQTT_ENABLE_V5
+                            // Step 6: skip publish properties section for MQTT 5
+                            if (_mqttVersion == MQTT_VERSION_5 && afterHdr < len) {
+                                afterHdr = skipProperties(this->buffer, afterHdr);
                             }
-                            // Send PUBREC (also for duplicates)
-                            sendSimplePacket(MQTTPUBREC, msgId);
-                            lastOutActivity = t;
+#endif
+                            payload = this->buffer + afterHdr;
+                            uint16_t plength = (afterHdr < len) ? (uint16_t)(len - afterHdr) : 0;
 
+                            if (qos == 1) {
+                                callback(topic, payload, plength);
+                                sendSimplePacket(MQTTPUBACK, msgId);
+                                lastOutActivity = t;
+                            } else {
+                                int8_t slot = findPendingSlot(msgId);
+                                if (slot < 0) {
+                                    callback(topic, payload, plength);
+                                    slot = findFreeSlot();
+                                    if (slot >= 0) {
+                                        pendingMessages[slot].msgId = msgId;
+                                        pendingMessages[slot].state = MQTT_QOS_STATE_WAIT_PUBREL;
+                                    }
+                                }
+                                sendSimplePacket(MQTTPUBREC, msgId);
+                                lastOutActivity = t;
+                            }
                         } else {
-                            // QoS 0
-                            payload = this->buffer+llen+3+tl;
-                            callback(topic,payload,len-llen-3-tl);
+                            // QoS 0: payload starts right after topic
+                            uint16_t afterHdr = (uint16_t)(llen + 3 + tl);
+#if MQTT_ENABLE_V5
+                            // Step 6: skip publish properties section for MQTT 5
+                            if (_mqttVersion == MQTT_VERSION_5 && afterHdr < len) {
+                                afterHdr = skipProperties(this->buffer, afterHdr);
+                            }
+#endif
+                            payload = this->buffer + afterHdr;
+                            uint16_t plength = (afterHdr < len) ? (uint16_t)(len - afterHdr) : 0;
+                            callback(topic, payload, plength);
                         }
                     }
                 } else if (type == MQTTPUBACK) {
@@ -434,6 +472,8 @@ boolean PubSubClient::loop() {
                     msgId = (this->buffer[llen+1]<<8)+this->buffer[llen+2];
                     int8_t slot = findPendingSlot(msgId);
                     if (slot >= 0) {
+                        // Step 7: MQTT 5 — reason code present if remlen > 2 (len > llen+3)
+                        // Free the slot regardless (we notified above; future: user callback on error)
                         pendingMessages[slot].state = MQTT_QOS_STATE_FREE;
                         pendingMessages[slot].msgId = 0;
                     }
@@ -441,12 +481,27 @@ boolean PubSubClient::loop() {
                     // QoS 2 outgoing: received PUBREC, send PUBREL
                     msgId = (this->buffer[llen+1]<<8)+this->buffer[llen+2];
                     int8_t slot = findPendingSlot(msgId);
-                    if (slot >= 0) {
-                        pendingMessages[slot].state = MQTT_QOS_STATE_WAIT_PUBCOMP;
+#if MQTT_ENABLE_V5
+                    // Step 7: if reason code present and non-success, free the slot (abort)
+                    if (_mqttVersion == MQTT_VERSION_5 && len > (uint16_t)(llen + 3)) {
+                        uint8_t rc5 = this->buffer[llen + 3];
+                        if (rc5 >= 0x80) {
+                            if (slot >= 0) {
+                                pendingMessages[slot].state = MQTT_QOS_STATE_FREE;
+                                pendingMessages[slot].msgId = 0;
+                            }
+                        } else if (slot >= 0) {
+                            pendingMessages[slot].state = MQTT_QOS_STATE_WAIT_PUBCOMP;
+                            sendSimplePacket(MQTTPUBREL | MQTTQOS1, msgId);
+                            lastOutActivity = t;
+                        }
+                    } else
+#endif
+                    {
+                        if (slot >= 0) pendingMessages[slot].state = MQTT_QOS_STATE_WAIT_PUBCOMP;
+                        sendSimplePacket(MQTTPUBREL | MQTTQOS1, msgId);
+                        lastOutActivity = t;
                     }
-                    // PUBREL requires reserved bits 0010 per MQTT spec
-                    sendSimplePacket(MQTTPUBREL | MQTTQOS1, msgId);
-                    lastOutActivity = t;
                 } else if (type == MQTTPUBREL) {
                     // QoS 2 incoming: received PUBREL, send PUBCOMP
                     msgId = (this->buffer[llen+1]<<8)+this->buffer[llen+2];
@@ -465,6 +520,14 @@ boolean PubSubClient::loop() {
                         pendingMessages[slot].state = MQTT_QOS_STATE_FREE;
                         pendingMessages[slot].msgId = 0;
                     }
+                } else if (type == MQTTSUBACK) {
+                    // Step 9: Subscribe acknowledgment
+                    // msgId = buffer[llen+1..llen+2] (available if needed for future callback)
+                    // MQTT 5: reason codes follow properties; MQTT 3.1.1: granted QoS values follow msgId
+                    // For now: consumed silently (subscribe() is fire-and-forget)
+                    (void)llen;
+                } else if (type == MQTTUNSUBACK) {
+                    // Step 9: Unsubscribe acknowledgment — consumed silently
                 } else if (type == MQTTPINGREQ) {
                     this->buffer[0] = MQTTPINGRESP;
                     this->buffer[1] = 0;
@@ -504,8 +567,14 @@ boolean PubSubClient::publish(const char* topic, const uint8_t* payload, unsigne
 
     size_t topicLen = strnlen(topic, this->bufferSize);
     uint16_t msgIdLen = (qos > 0) ? 2 : 0;
-    // Check that header + topic (2-byte len prefix + chars) + msgId + payload fits
-    if (this->bufferSize < MQTT_MAX_HEADER_SIZE + 2 + topicLen + msgIdLen + plength) {
+#if MQTT_ENABLE_V5
+    // Step 6: MQTT 5 PUBLISH carries a 1-byte (minimum) properties-length field
+    uint16_t propsLen = (_mqttVersion == MQTT_VERSION_5) ? 1 : 0;
+#else
+    uint16_t propsLen = 0;
+#endif
+    // Check that header + topic-len-prefix + topic + msgId + props + payload all fit
+    if (this->bufferSize < MQTT_MAX_HEADER_SIZE + 2 + topicLen + msgIdLen + propsLen + plength) {
         return false;
     }
     uint16_t length = MQTT_MAX_HEADER_SIZE;
@@ -518,6 +587,13 @@ boolean PubSubClient::publish(const char* topic, const uint8_t* payload, unsigne
         this->buffer[length++] = (currentMsgId >> 8);
         this->buffer[length++] = (currentMsgId & 0xFF);
     }
+
+#if MQTT_ENABLE_V5
+    // Step 6: insert publish properties section (empty for now)
+    if (_mqttVersion == MQTT_VERSION_5) {
+        this->buffer[length++] = 0x00; // Properties Length = 0
+    }
+#endif
 
     // Fast payload copy
     memcpy(this->buffer + length, payload, plength);
@@ -663,12 +739,17 @@ boolean PubSubClient::subscribe(const char* topic, uint8_t qos) {
     if (qos > 2) {
         return false;
     }
-    if (this->bufferSize < 9 + topicLength) {
-        // Too long
+#if MQTT_ENABLE_V5
+    // Step 8: MQTT 5 SUBSCRIBE requires 1 extra byte for the properties-length field
+    uint16_t minBuf = (_mqttVersion == MQTT_VERSION_5) ? (uint16_t)(10 + topicLength)
+                                                        : (uint16_t)(9 + topicLength);
+#else
+    uint16_t minBuf = (uint16_t)(9 + topicLength);
+#endif
+    if (this->bufferSize < minBuf) {
         return false;
     }
     if (connected()) {
-        // Leave room in the buffer for header and variable length field
         uint16_t length = MQTT_MAX_HEADER_SIZE;
         nextMsgId++;
         if (nextMsgId == 0) {
@@ -676,20 +757,32 @@ boolean PubSubClient::subscribe(const char* topic, uint8_t qos) {
         }
         this->buffer[length++] = (nextMsgId >> 8);
         this->buffer[length++] = (nextMsgId & 0xFF);
-        length = writeString((char*)topic, this->buffer,length);
-        this->buffer[length++] = qos;
-        return write(MQTTSUBSCRIBE|MQTTQOS1,this->buffer,length-MQTT_MAX_HEADER_SIZE);
+#if MQTT_ENABLE_V5
+        // Step 8: properties section (empty)
+        if (_mqttVersion == MQTT_VERSION_5) {
+            this->buffer[length++] = 0x00; // Properties Length = 0
+        }
+#endif
+        length = writeString((char*)topic, this->buffer, length);
+        this->buffer[length++] = qos; // bits 0-1: QoS; bits 2-5 (MQTT5 options): all 0
+        return write(MQTTSUBSCRIBE|MQTTQOS1, this->buffer, length-MQTT_MAX_HEADER_SIZE);
     }
     return false;
 }
 
 boolean PubSubClient::unsubscribe(const char* topic) {
-	size_t topicLength = strnlen(topic, this->bufferSize);
+    size_t topicLength = strnlen(topic, this->bufferSize);
     if (topic == 0) {
         return false;
     }
-    if (this->bufferSize < 9 + topicLength) {
-        // Too long
+#if MQTT_ENABLE_V5
+    // Step 8: MQTT 5 UNSUBSCRIBE requires 1 extra byte for properties-length field
+    uint16_t minBuf = (_mqttVersion == MQTT_VERSION_5) ? (uint16_t)(10 + topicLength)
+                                                        : (uint16_t)(9 + topicLength);
+#else
+    uint16_t minBuf = (uint16_t)(9 + topicLength);
+#endif
+    if (this->bufferSize < minBuf) {
         return false;
     }
     if (connected()) {
@@ -700,8 +793,14 @@ boolean PubSubClient::unsubscribe(const char* topic) {
         }
         this->buffer[length++] = (nextMsgId >> 8);
         this->buffer[length++] = (nextMsgId & 0xFF);
-        length = writeString(topic, this->buffer,length);
-        return write(MQTTUNSUBSCRIBE|MQTTQOS1,this->buffer,length-MQTT_MAX_HEADER_SIZE);
+#if MQTT_ENABLE_V5
+        // Step 8: properties section (empty)
+        if (_mqttVersion == MQTT_VERSION_5) {
+            this->buffer[length++] = 0x00; // Properties Length = 0
+        }
+#endif
+        length = writeString(topic, this->buffer, length);
+        return write(MQTTUNSUBSCRIBE|MQTTQOS1, this->buffer, length-MQTT_MAX_HEADER_SIZE);
     }
     return false;
 }

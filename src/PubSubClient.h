@@ -82,6 +82,39 @@
 // Maximum size of fixed header and variable length size header
 #define MQTT_MAX_HEADER_SIZE 5
 
+// -------------------------------------------------------------------------
+// MQTT 5 Property Identifiers (Section 2.2.2 of the MQTT 5 spec)
+// -------------------------------------------------------------------------
+#if MQTT_ENABLE_V5
+#define MQTT_PROP_PAYLOAD_FORMAT          0x01  // Byte
+#define MQTT_PROP_MESSAGE_EXPIRY          0x02  // Four Byte Integer
+#define MQTT_PROP_CONTENT_TYPE            0x03  // UTF-8 String
+#define MQTT_PROP_RESPONSE_TOPIC          0x08  // UTF-8 String
+#define MQTT_PROP_CORRELATION_DATA        0x09  // Binary Data
+#define MQTT_PROP_SUBSCRIPTION_IDENTIFIER 0x0B  // Variable Byte Integer
+#define MQTT_PROP_SESSION_EXPIRY          0x11  // Four Byte Integer
+#define MQTT_PROP_ASSIGNED_CLIENT_ID      0x12  // UTF-8 String
+#define MQTT_PROP_SERVER_KEEP_ALIVE       0x13  // Two Byte Integer
+#define MQTT_PROP_AUTH_METHOD             0x15  // UTF-8 String
+#define MQTT_PROP_AUTH_DATA               0x16  // Binary Data
+#define MQTT_PROP_REQUEST_PROBLEM_INFO    0x17  // Byte
+#define MQTT_PROP_WILL_DELAY              0x18  // Four Byte Integer
+#define MQTT_PROP_REQUEST_RESPONSE_INFO   0x19  // Byte
+#define MQTT_PROP_RESPONSE_INFO           0x1A  // UTF-8 String
+#define MQTT_PROP_SERVER_REFERENCE        0x1C  // UTF-8 String
+#define MQTT_PROP_REASON_STRING           0x1F  // UTF-8 String
+#define MQTT_PROP_RECEIVE_MAXIMUM         0x21  // Two Byte Integer
+#define MQTT_PROP_TOPIC_ALIAS_MAX         0x22  // Two Byte Integer
+#define MQTT_PROP_TOPIC_ALIAS             0x23  // Two Byte Integer
+#define MQTT_PROP_MAX_QOS                 0x24  // Byte
+#define MQTT_PROP_RETAIN_AVAILABLE        0x25  // Byte
+#define MQTT_PROP_USER_PROPERTY           0x26  // UTF-8 String Pair (key + value)
+#define MQTT_PROP_MAX_PACKET_SIZE         0x27  // Four Byte Integer
+#define MQTT_PROP_WILDCARD_SUB_AVAILABLE  0x28  // Byte
+#define MQTT_PROP_SUB_ID_AVAILABLE        0x29  // Byte
+#define MQTT_PROP_SHARED_SUB_AVAILABLE    0x2A  // Byte
+#endif // MQTT_ENABLE_V5
+
 // QoS message tracking states (for in-flight QoS 1/2 messages)
 #define MQTT_QOS_STATE_FREE          0
 #define MQTT_QOS_STATE_WAIT_PUBACK   1  // Outgoing QoS 1: waiting for PUBACK
@@ -151,7 +184,9 @@ private:
    // Find a property by id; sets *valueOut to the start of its value, *valueLenOut to its encoded byte size
    bool     findProperty(const uint8_t* buf, uint16_t propsPayloadStart, uint16_t propsPayloadEnd,
                          uint8_t id, const uint8_t** valueOut, uint16_t* valueLenOut);
-   uint8_t  _mqttVersion; // runtime-selected protocol version (1, 4, or 5)
+   uint8_t  _mqttVersion;         // runtime-selected protocol version (3, 4, or 5)
+   uint16_t _v5ServerReceiveMax;  // Step 5: broker's Receive Maximum (default 65535)
+   uint16_t _v5ServerKeepalive;   // Step 5: broker's Server Keep Alive (0 = unset)
 #endif // MQTT_ENABLE_V5
    // Build up the header ready to send
    // Returns the size of the header

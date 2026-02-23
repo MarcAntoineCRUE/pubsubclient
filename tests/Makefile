@@ -23,3 +23,6 @@ test:
 	@bin/receive_spec
 	@bin/subscribe_spec
 	@bin/keepalive_spec
+	@bin/improvements_spec
+	@bin/mqtt5_foundation_spec
+	@bin/mqtt5_core_spec
