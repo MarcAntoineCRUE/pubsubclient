@@ -19,6 +19,7 @@
 
 #define MQTT_VERSION_3_1   3  ///< Defines MQTT 3.1 protocol version, see #MQTT_VERSION
 #define MQTT_VERSION_3_1_1 4  ///< Defines MQTT 3.1.1 protocol version, see #MQTT_VERSION
+#define MQTT_VERSION_5     5  ///< Defines MQTT 5.0 protocol version, see #MQTT_VERSION
 
 //< @note The following #define directives can be used to configure the library.
 
@@ -95,6 +96,69 @@
 #define MQTT_CONNECT_UNAUTHORIZED    5   ///< The client is not authorized to connect to the server.
 /** @} */
 
+/**
+ * @defgroup group_mqtt5_reason MQTT 5 Reason Codes (CONNACK)
+ * @brief MQTT 5 specific reason codes returned in CONNACK packets (values >= 0x80 indicate failure).
+ * @{
+ */
+#define MQTT5_REASON_SUCCESS                    0x00  ///< Connection accepted.
+#define MQTT5_REASON_UNSPECIFIED_ERROR          0x80  ///< Unspecified error.
+#define MQTT5_REASON_MALFORMED_PACKET           0x81  ///< Malformed packet.
+#define MQTT5_REASON_PROTOCOL_ERROR             0x82  ///< Protocol error.
+#define MQTT5_REASON_IMPL_SPECIFIC_ERROR        0x83  ///< Implementation specific error.
+#define MQTT5_REASON_UNSUPPORTED_PROTOCOL       0x84  ///< Unsupported protocol version.
+#define MQTT5_REASON_CLIENT_ID_INVALID          0x85  ///< Client identifier not valid.
+#define MQTT5_REASON_BAD_CREDENTIALS            0x86  ///< Bad username or password.
+#define MQTT5_REASON_NOT_AUTHORIZED             0x87  ///< Not authorized.
+#define MQTT5_REASON_SERVER_UNAVAILABLE         0x88  ///< Server unavailable.
+#define MQTT5_REASON_SERVER_BUSY                0x89  ///< Server busy.
+#define MQTT5_REASON_BANNED                     0x8A  ///< Banned.
+#define MQTT5_REASON_BAD_AUTH_METHOD            0x8C  ///< Bad authentication method.
+#define MQTT5_REASON_TOPIC_NAME_INVALID         0x90  ///< Topic name invalid.
+#define MQTT5_REASON_PACKET_TOO_LARGE           0x95  ///< Packet too large.
+#define MQTT5_REASON_QUOTA_EXCEEDED             0x97  ///< Quota exceeded.
+#define MQTT5_REASON_PAYLOAD_FORMAT_INVALID     0x99  ///< Payload format invalid.
+#define MQTT5_REASON_RETAIN_NOT_SUPPORTED       0x9A  ///< Retain not supported.
+#define MQTT5_REASON_QOS_NOT_SUPPORTED          0x9B  ///< QoS not supported.
+#define MQTT5_REASON_USE_ANOTHER_SERVER         0x9C  ///< Use another server.
+#define MQTT5_REASON_SERVER_MOVED               0x9D  ///< Server moved.
+#define MQTT5_REASON_CONNECTION_RATE_EXCEEDED   0x9F  ///< Connection rate exceeded.
+/** @} */
+
+/**
+ * @defgroup group_mqtt5_props MQTT 5 Property Identifiers
+ * @brief Property identifiers used in MQTT 5 packets.
+ * @{
+ */
+#define MQTT_PROP_PAYLOAD_FORMAT        ((uint8_t)0x01)  ///< Payload Format Indicator (Byte)
+#define MQTT_PROP_MESSAGE_EXPIRY        ((uint8_t)0x02)  ///< Message Expiry Interval (Four Byte Integer)
+#define MQTT_PROP_CONTENT_TYPE          ((uint8_t)0x03)  ///< Content Type (UTF-8 Encoded String)
+#define MQTT_PROP_RESPONSE_TOPIC        ((uint8_t)0x08)  ///< Response Topic (UTF-8 Encoded String)
+#define MQTT_PROP_CORRELATION_DATA      ((uint8_t)0x09)  ///< Correlation Data (Binary Data)
+#define MQTT_PROP_SUBSCRIPTION_ID       ((uint8_t)0x0B)  ///< Subscription Identifier (Variable Byte Integer)
+#define MQTT_PROP_SESSION_EXPIRY        ((uint8_t)0x11)  ///< Session Expiry Interval (Four Byte Integer)
+#define MQTT_PROP_ASSIGNED_CLIENT_ID    ((uint8_t)0x12)  ///< Assigned Client Identifier (UTF-8 Encoded String)
+#define MQTT_PROP_SERVER_KEEPALIVE      ((uint8_t)0x13)  ///< Server Keep Alive (Two Byte Integer)
+#define MQTT_PROP_AUTH_METHOD           ((uint8_t)0x15)  ///< Authentication Method (UTF-8 Encoded String)
+#define MQTT_PROP_AUTH_DATA             ((uint8_t)0x16)  ///< Authentication Data (Binary Data)
+#define MQTT_PROP_REQUEST_PROBLEM_INFO  ((uint8_t)0x17)  ///< Request Problem Information (Byte)
+#define MQTT_PROP_WILL_DELAY            ((uint8_t)0x18)  ///< Will Delay Interval (Four Byte Integer)
+#define MQTT_PROP_REQUEST_RESPONSE_INFO ((uint8_t)0x19)  ///< Request Response Information (Byte)
+#define MQTT_PROP_RESPONSE_INFO         ((uint8_t)0x1A)  ///< Response Information (UTF-8 Encoded String)
+#define MQTT_PROP_SERVER_REFERENCE      ((uint8_t)0x1C)  ///< Server Reference (UTF-8 Encoded String)
+#define MQTT_PROP_REASON_STRING         ((uint8_t)0x1F)  ///< Reason String (UTF-8 Encoded String)
+#define MQTT_PROP_RECEIVE_MAXIMUM       ((uint8_t)0x21)  ///< Receive Maximum (Two Byte Integer)
+#define MQTT_PROP_TOPIC_ALIAS_MAX       ((uint8_t)0x22)  ///< Topic Alias Maximum (Two Byte Integer)
+#define MQTT_PROP_TOPIC_ALIAS           ((uint8_t)0x23)  ///< Topic Alias (Two Byte Integer)
+#define MQTT_PROP_MAX_QOS               ((uint8_t)0x24)  ///< Maximum QoS (Byte)
+#define MQTT_PROP_RETAIN_AVAILABLE      ((uint8_t)0x25)  ///< Retain Available (Byte)
+#define MQTT_PROP_USER_PROPERTY         ((uint8_t)0x26)  ///< User Property (UTF-8 String Pair)
+#define MQTT_PROP_MAXIMUM_PACKET_SIZE   ((uint8_t)0x27)  ///< Maximum Packet Size (Four Byte Integer)
+#define MQTT_PROP_WILDCARD_SUB_AVAIL    ((uint8_t)0x28)  ///< Wildcard Subscription Available (Byte)
+#define MQTT_PROP_SUB_ID_AVAIL          ((uint8_t)0x29)  ///< Subscription Identifier Available (Byte)
+#define MQTT_PROP_SHARED_SUB_AVAIL      ((uint8_t)0x2A)  ///< Shared Subscription Available (Byte)
+/** @} */
+
 /// \cond
 #define MQTTRETAINED    1        // Retained flag in the header
 #define MQTTCONNECT     1 << 4   // Client request to connect to Server
@@ -111,7 +175,7 @@
 #define MQTTPINGREQ     12 << 4  // PING Request
 #define MQTTPINGRESP    13 << 4  // PING Response
 #define MQTTDISCONNECT  14 << 4  // Client is Disconnecting
-#define MQTTRESERVED    15 << 4  // Reserved
+#define MQTTAUTH        15 << 4  // Authentication (MQTT 5 only)
 /// \endcond
 
 /**
@@ -191,6 +255,7 @@ class PubSubClient : public Print {
     uint16_t _port{};
     Stream* _stream{};
     int _state{MQTT_DISCONNECTED};
+    uint8_t _mqttVersion{MQTT_VERSION};  ///< Runtime MQTT protocol version (default: compile-time #MQTT_VERSION)
 
     size_t readPacket(uint8_t* hdrLen);
     bool handlePacket(uint8_t hdrLen, size_t len);
@@ -210,6 +275,56 @@ class PubSubClient : public Print {
     // Add to buffer and flush if full (only to be used with beginPublish/endPublish)
     size_t appendBuffer(uint8_t data);
     size_t flushBuffer();
+
+    // --- MQTT 5: Variable Byte Integer helpers ---
+    /**
+     * @brief Encodes a 32-bit value as a Variable Byte Integer into buf.
+     * @param value The value to encode (0 .. 268435455).
+     * @param buf   Destination buffer of at least 4 bytes.
+     * @return Number of bytes written (1..4), or 0 on overflow.
+     */
+    uint8_t encodeVariableByteInteger(uint32_t value, uint8_t* buf);
+
+    /**
+     * @brief Decodes a Variable Byte Integer from buf.
+     * @param buf       Source buffer.
+     * @param bytesUsed Set to the number of bytes consumed (1..4).
+     * @return Decoded value.
+     */
+    uint32_t decodeVariableByteInteger(const uint8_t* buf, uint8_t* bytesUsed);
+
+    // --- MQTT 5: Property encoding helpers ---
+    /** Write raw property [id][value bytes] into _buffer at pos. Returns new pos. */
+    size_t writePropertyRaw(uint8_t id, const uint8_t* value, size_t len, size_t pos);
+    /** Write 1-byte property. */
+    size_t writePropertyU8(uint8_t id, uint8_t value, size_t pos);
+    /** Write 2-byte big-endian property. */
+    size_t writePropertyU16(uint8_t id, uint16_t value, size_t pos);
+    /** Write 4-byte big-endian property. */
+    size_t writePropertyU32(uint8_t id, uint32_t value, size_t pos);
+    /** Write UTF-8 string property (2-byte length prefix + bytes). */
+    size_t writePropertyStr(uint8_t id, const char* value, size_t pos);
+    /** Write VBI-encoded property. */
+    size_t writePropertyVBI(uint8_t id, uint32_t value, size_t pos);
+
+    /**
+     * @brief Advance pos past the entire properties section starting with a VBI length.
+     * @param pos Position in _buffer where the property length VBI starts.
+     * @return Position immediately after the properties section, or pos on error.
+     */
+    size_t skipProperties(size_t pos);
+
+    /**
+     * @brief Scan the properties section for a specific property ID.
+     * @param propsStart Position of first byte of property data (after the length VBI).
+     * @param propsEnd   Position one past the last byte of the properties section.
+     * @param id         Property identifier to search for.
+     * @param valueOut   Set to pointer to value bytes inside _buffer (may be nullptr).
+     * @param valueLenOut Set to length of value (may be nullptr).
+     * @return true if property was found.
+     */
+    bool findProperty(size_t propsStart, size_t propsEnd, uint8_t id,
+                      const uint8_t** valueOut, uint16_t* valueLenOut);
 
    public:
     /**
@@ -343,6 +458,20 @@ class PubSubClient : public Print {
      * @brief Destructor for the PubSubClient class.
      */
     ~PubSubClient();
+
+    /**
+     * @brief Sets the MQTT protocol version to use at runtime.
+     * Must be called before connect(). Does not affect an active connection.
+     * @param version One of #MQTT_VERSION_3_1, #MQTT_VERSION_3_1_1, or #MQTT_VERSION_5.
+     * @return The client instance, allowing the function to be chained.
+     */
+    PubSubClient& setMqttVersion(uint8_t version);
+
+    /**
+     * @brief Returns the currently configured MQTT protocol version.
+     * @return One of #MQTT_VERSION_3_1, #MQTT_VERSION_3_1_1, or #MQTT_VERSION_5.
+     */
+    uint8_t getMqttVersion() const;
 
     /**
      * @brief Sets the server details.
