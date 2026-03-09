@@ -10,6 +10,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 ### Added
 
 * Document `NOFUNCTIONAL` macro: saves ~12-16 bytes of RAM by replacing `std::function` with a raw function pointer; trade-off is that lambdas with captures are no longer accepted as callback
+* Full MQTT 3.1.1 QoS 2 (exactly-once) compliance for both inbound and outbound message flows:
+  * **Inbound:** received QoS 2 messages are now buffered in RAM on PUBLISH and delivered to the application callback only on receipt of PUBREL, as required by MQTT 3.1.1 §4.3.3; previously the callback was invoked immediately on PUBLISH, violating the exactly-once guarantee
+  * **Inbound deduplication:** duplicate PUBLISH packets (same Packet Identifier, DUP flag set) are detected and suppressed; PUBREC is re-sent but the application callback is not called again
+  * **Outbound:** `beginPublishImpl()` now tracks the outbound QoS 2 Packet Identifier and handshake state (`_qos2OutState`); on receipt of PUBREC, PUBREL is sent and the state advances; on receipt of PUBCOMP, the state is cleared
+  * **PUBREL retransmission:** `loop()` retransmits PUBREL if PUBCOMP is not received within `MQTT_QOS2_RETRY_TIMEOUT` seconds (default 10 s), as required by MQTT 3.1.1 §4.4
+  * **QoS 2 subscribe:** `subscribeImpl()` now accepts QoS 2 subscriptions (previously rejected with `qos > MQTT_QOS1`)
+  * **State cleanup:** `clearQoS2State()` is called on `connect()`, `disconnect()`, and connection loss to reset all pending QoS 2 state and free the inbound buffer
+  * **`isPublishQoS2Complete()`:** new public method that returns `true` when no outbound QoS 2 handshake is in progress, allowing callers to wait for confirmed delivery before publishing the next QoS 2 message
 
 ### Changed
 

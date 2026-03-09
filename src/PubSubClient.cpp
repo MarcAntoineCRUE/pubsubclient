@@ -106,6 +106,7 @@ PubSubClient::PubSubClient(const char* domain, uint16_t port, MQTT_CALLBACK_SIGN
 }
 
 PubSubClient::~PubSubClient() {
+    clearQoS2State();
     free(_domain);
     free(_buffer);
 }
@@ -128,7 +129,8 @@ bool PubSubClient::connect(const char* id, const char* user, const char* pass, c
         }
 
         if (result == 1) {
-            _nextMsgId = 1;  // init msgId (packet identifier)
+            _nextMsgId = 1;    // init msgId (packet identifier)
+            clearQoS2State();  // clear any pending QoS 2 state from previous connection
 
 #if MQTT_VERSION == MQTT_VERSION_3_1
             const uint8_t protocol[9] = {0x00, 0x06, 'M', 'Q', 'I', 's', 'd', 'p', MQTT_VERSION};
@@ -224,6 +226,7 @@ bool PubSubClient::connected() {
         DEBUG_PSC_PRINTF("lost connection (client may have more details)\n");
         _state = MQTT_CONNECTION_LOST;
         _client->stop();
+        clearQoS2State();
         _pingOutstanding = false;
     }
     return false;
@@ -240,6 +243,7 @@ void PubSubClient::disconnect() {
         _client->stop();
         _lastInActivity = _lastOutActivity = millis();
     }
+    clearQoS2State();
     _pingOutstanding = false;
 }
 
@@ -409,16 +413,72 @@ bool PubSubClient::handlePacket(uint8_t hdrLen, size_t length) {
                     uint8_t publishQos = MQTT_HDR_GET_QOS(_buffer[0]);  // save QoS before _buffer[0] is overwritten
                     // Note: _bufferSize >= 4 is guaranteed by loop() guard (_bufferSize >= MQTT_MAX_HEADER_SIZE = 5)
                     uint16_t msgId = (uint16_t)((_buffer[payloadOffset] << 8) + _buffer[payloadOffset + 1u]);
-                    callback(topic, payload + 2, payloadLen - 2);  // strip the msgId before calling callback
 
-                    // QoS 1: respond with PUBACK
-                    // QoS 2: respond with PUBREC (first step of the QoS 2 subscriber handshake)
-                    _buffer[0] = (publishQos == MQTT_QOS1) ? MQTTPUBACK : MQTTPUBREC;
-                    _buffer[1] = 2;
-                    _buffer[2] = (uint8_t)(msgId >> 8);
-                    _buffer[3] = (uint8_t)(msgId & 0xFF);
-                    if (_client->write(_buffer, 4) == 4) {
-                        _lastOutActivity = millis();
+                    if (publishQos == MQTT_QOS1) {
+                        // QoS 1: deliver immediately, then respond with PUBACK
+                        callback(topic, payload + 2, payloadLen - 2);
+                        _buffer[0] = MQTTPUBACK;
+                        _buffer[1] = 2;
+                        _buffer[2] = (uint8_t)(msgId >> 8);
+                        _buffer[3] = (uint8_t)(msgId & 0xFF);
+                        if (_client->write(_buffer, 4) == 4) {
+                            _lastOutActivity = millis();
+                        }
+                    } else {
+                        // QoS 2: buffer the message for delivery on PUBREL, then respond with PUBREC.
+                        // Per MQTT 3.1.1 spec section 4.3.3, the message MUST only be delivered
+                        // to the application on receipt of the corresponding PUBREL packet.
+                        if (_qos2InMsgId != msgId) {
+                            // New message (not a duplicate retransmission)
+                            if (_stream) {
+                                // Stream mode: payload was already written to stream during readPacket().
+                                // Deliver callback immediately as we cannot buffer stream data.
+                                // Note: this is a pragmatic compromise; stream-mode QoS 2 does not
+                                // guarantee exactly-once delivery to the application.
+                                callback(topic, payload + 2, payloadLen - 2);
+                                // Track the msgId so duplicate PUBLISHes are filtered
+                                _qos2InMsgId = msgId;
+                                _qos2InTopicLen = 0;
+                                _qos2InPayloadLen = 0;
+                            } else {
+                                // Normal mode: store topic and payload for later delivery on PUBREL
+                                if (_qos2InBuffer) {
+                                    // Previous inbound QoS 2 flow was not completed; overwriting
+                                    ERROR_PSC_PRINTF_P(
+                                        "handlePacket(): Overwriting incomplete QoS 2 inbound "
+                                        "(old msgId=%u, new msgId=%u)\n",
+                                        _qos2InMsgId, msgId);
+                                    free(_qos2InBuffer);
+                                    _qos2InBuffer = nullptr;
+                                }
+                                size_t actualPayloadLen = payloadLen - 2;
+                                size_t bufNeeded = (size_t)topicLen + 1u + actualPayloadLen;
+                                _qos2InBuffer = (uint8_t*)malloc(bufNeeded);
+                                if (_qos2InBuffer) {
+                                    memcpy(_qos2InBuffer, topic, topicLen);
+                                    _qos2InBuffer[topicLen] = '\0';
+                                    if (actualPayloadLen > 0) {
+                                        memcpy(_qos2InBuffer + topicLen + 1, payload + 2, actualPayloadLen);
+                                    }
+                                    _qos2InTopicLen = topicLen;
+                                    _qos2InPayloadLen = actualPayloadLen;
+                                    _qos2InMsgId = msgId;
+                                } else {
+                                    ERROR_PSC_PRINTF_P(
+                                        "handlePacket(): Failed to allocate QoS 2 inbound buffer "
+                                        "(%zu bytes)\n",
+                                        bufNeeded);
+                                }
+                            }
+                        }
+                        // Send PUBREC regardless of whether this is a new or duplicate message
+                        _buffer[0] = MQTTPUBREC;
+                        _buffer[1] = 2;
+                        _buffer[2] = (uint8_t)(msgId >> 8);
+                        _buffer[3] = (uint8_t)(msgId & 0xFF);
+                        if (_client->write(_buffer, 4) == 4) {
+                            _lastOutActivity = millis();
+                        }
                     }
                 }
             }
@@ -438,25 +498,54 @@ bool PubSubClient::handlePacket(uint8_t hdrLen, size_t length) {
                 ERROR_PSC_PRINTF_P("handlePacket(): Received PUBREC packet with length %zu, expected at least 4 bytes\n", length);
                 return false;
             }
-            // MQTT Publish Release (QoS 2 publisher handshake, part 2): See section 3.6 MQTT v3.1.1 protocol specification
-            _buffer[0] = MQTTPUBREL | 2;  // PUBREL fixed header: bit 1 must be set per spec
-            // bytes 1-3 of PUBREL are the same as of PUBREC (remaining length + msgId)
-            if (_client->write(_buffer, 4) == 4) {
-                _lastOutActivity = millis();
+            {
+                uint16_t msgId = ((uint16_t)_buffer[2] << 8) | _buffer[3];
+                // MQTT Publish Release (QoS 2 publisher handshake, part 2): See section 3.6 MQTT v3.1.1 protocol specification
+                _buffer[0] = MQTTPUBREL | 2;  // PUBREL fixed header: bit 1 must be set per spec
+                // bytes 1-3 of PUBREL are the same as of PUBREC (remaining length + msgId)
+                if (_client->write(_buffer, 4) == 4) {
+                    _lastOutActivity = millis();
+                }
+                // Update outbound QoS 2 state to awaiting PUBCOMP
+                if (_qos2OutState == 1 && _qos2OutMsgId == msgId) {
+                    _qos2OutState = 2;
+                    _qos2OutTimestamp = millis();
+                }
             }
             break;
         case MQTTPUBREL:
             // MQTT Publish Release (QoS 2 subscriber handshake, part 2): broker releases the message to us.
+            // Per MQTT 3.1.1 spec section 4.3.3, the message is now delivered to the application.
             // See section 3.6 MQTT v3.1.1 protocol specification.
             if (length < 4) {
                 ERROR_PSC_PRINTF_P("handlePacket(): Received PUBREL packet with length %zu, expected at least 4 bytes\n", length);
                 return false;
             }
-            // MQTT Publish Complete (QoS 2 subscriber handshake, part 3): See section 3.7 MQTT v3.1.1 protocol specification
-            _buffer[0] = MQTTPUBCOMP;
-            // bytes 1-3 of PUBCOMP are the same as of PUBREL (remaining length + msgId)
-            if (_client->write(_buffer, 4) == 4) {
-                _lastOutActivity = millis();
+            {
+                uint16_t msgId = ((uint16_t)_buffer[2] << 8) | _buffer[3];
+                // Deliver the buffered QoS 2 message to the application callback
+                if (callback && _qos2InMsgId == msgId && _qos2InBuffer) {
+                    char* topic = (char*)_qos2InBuffer;
+                    uint8_t* payload = _qos2InBuffer + _qos2InTopicLen + 1;
+                    callback(topic, payload, _qos2InPayloadLen);
+                }
+                // Clean up inbound QoS 2 state for this msgId
+                if (_qos2InMsgId == msgId) {
+                    free(_qos2InBuffer);
+                    _qos2InBuffer = nullptr;
+                    _qos2InTopicLen = 0;
+                    _qos2InPayloadLen = 0;
+                    _qos2InMsgId = 0;
+                }
+                // MQTT Publish Complete (QoS 2 subscriber handshake, part 3): See section 3.7
+                // Always send PUBCOMP in response to PUBREL, per MQTT spec.
+                _buffer[0] = MQTTPUBCOMP;
+                _buffer[1] = 2;
+                _buffer[2] = (uint8_t)(msgId >> 8);
+                _buffer[3] = (uint8_t)(msgId & 0xFF);
+                if (_client->write(_buffer, 4) == 4) {
+                    _lastOutActivity = millis();
+                }
             }
             break;
         case MQTTPUBCOMP:
@@ -466,7 +555,15 @@ bool PubSubClient::handlePacket(uint8_t hdrLen, size_t length) {
                 ERROR_PSC_PRINTF_P("handlePacket(): Received PUBCOMP packet with length %zu, expected at least 4 bytes\n", length);
                 return false;
             }
-            // No futher action here, as resending is not supported.
+            {
+                uint16_t msgId = ((uint16_t)_buffer[2] << 8) | _buffer[3];
+                // Complete the outbound QoS 2 handshake
+                if (_qos2OutState == 2 && _qos2OutMsgId == msgId) {
+                    _qos2OutState = 0;
+                    _qos2OutMsgId = 0;
+                    _qos2OutTimestamp = 0;
+                }
+            }
             break;
         case MQTTPINGREQ:
             // MQTT Ping Request: See section 3.12 MQTT v3.1.1 protocol specification
@@ -520,6 +617,18 @@ bool PubSubClient::loop() {
                 _lastInActivity = _lastOutActivity = t;
                 _pingOutstanding = true;
             }
+        }
+    }
+    // Retransmit PUBREL for outbound QoS 2 if the expected PUBCOMP has not arrived in time.
+    // Per MQTT 3.1.1 spec section 4.3.3, the sender MUST re-send PUBREL until PUBCOMP is received.
+    if (_qos2OutState == 2 && (t - _qos2OutTimestamp >= (MQTT_QOS2_RETRY_TIMEOUT * 1000UL))) {
+        _buffer[0] = MQTTPUBREL | 2;  // PUBREL fixed header: bit 1 must be set per spec
+        _buffer[1] = 2;
+        _buffer[2] = (uint8_t)(_qos2OutMsgId >> 8);
+        _buffer[3] = (uint8_t)(_qos2OutMsgId & 0xFF);
+        if (_client->write(_buffer, 4) == 4) {
+            _lastOutActivity = t;
+            _qos2OutTimestamp = t;  // reset retransmission timer
         }
     }
     if (_client->available()) {
@@ -595,6 +704,12 @@ bool PubSubClient::beginPublishImpl(bool progmem, const char* topic, size_t plen
         return false;
     }
 
+    // Only one outbound QoS 2 publish can be in-flight at a time
+    if (qos == MQTT_QOS2 && _qos2OutState != 0) {
+        ERROR_PSC_PRINTF_P("beginPublish() called with QoS 2 while another QoS 2 handshake is pending\n");
+        return false;
+    }
+
     const size_t nextMsgLen = (qos > MQTT_QOS0) ? 2 : 0;  // add 2 bytes for nextMsgId if QoS > 0
     // check if the header, the topic (including 2 length bytes) and nextMsgId fit into the _buffer
     if (connected() && (MQTT_MAX_HEADER_SIZE + topicLen + 2 + nextMsgLen <= _bufferSize)) {
@@ -611,7 +726,16 @@ bool PubSubClient::beginPublishImpl(bool progmem, const char* topic, size_t plen
         // as the header length is variable, it starts at MQTT_MAX_HEADER_SIZE - hdrLen (see buildHeader() documentation)
         size_t rc = _client->write(_buffer + (MQTT_MAX_HEADER_SIZE - hdrLen), hdrLen + topicLen + nextMsgLen);
         _lastOutActivity = millis();
-        return (rc == (hdrLen + topicLen + nextMsgLen));
+        if (rc == (hdrLen + topicLen + nextMsgLen)) {
+            // Track outbound QoS 2 state for the 4-step handshake
+            if (qos == MQTT_QOS2) {
+                _qos2OutMsgId = _nextMsgId;
+                _qos2OutState = 1;  // awaiting PUBREC
+                _qos2OutTimestamp = millis();
+            }
+            return true;
+        }
+        return false;
     }
     return false;
 }
@@ -888,7 +1012,7 @@ size_t PubSubClient::flushBuffer() {
  */
 bool PubSubClient::subscribeImpl(bool progmem, const char* topic, uint8_t qos) {
     if (!topic) return false;
-    if (qos > MQTT_QOS1) return false;  // only QoS 0 and 1 supported
+    if (qos > MQTT_QOS2) return false;  // only valid QoS supported (0, 1, 2)
 
     // get topic length depending on storage (RAM vs PROGMEM)
     size_t topicLen = progmem ? strnlen_P(topic, _bufferSize) : strnlen(topic, _bufferSize);
@@ -1011,6 +1135,25 @@ PubSubClient& PubSubClient::setKeepAlive(uint16_t keepAlive) {
 PubSubClient& PubSubClient::setSocketTimeout(uint16_t timeout) {
     _socketTimeoutMillis = timeout * 1000UL;
     return *this;
+}
+
+/**
+ * @brief  Clear all pending QoS 2 state and free the inbound buffer.
+ * Called on connect, disconnect, and connection loss.
+ */
+void PubSubClient::clearQoS2State() {
+    free(_qos2InBuffer);
+    _qos2InBuffer = nullptr;
+    _qos2InTopicLen = 0;
+    _qos2InPayloadLen = 0;
+    _qos2InMsgId = 0;
+    _qos2OutMsgId = 0;
+    _qos2OutState = 0;
+    _qos2OutTimestamp = 0;
+}
+
+bool PubSubClient::isPublishQoS2Complete() {
+    return (_qos2OutState == 0);
 }
 
 int PubSubClient::state() {

@@ -79,6 +79,16 @@
 #endif
 
 /**
+ * @brief Sets the timeout, in seconds, for retransmitting QoS 2 control packets (PUBREL).
+ * If the expected response is not received within this time, the control packet is retransmitted.
+ * This value can be overridden by defining MQTT_QOS2_RETRY_TIMEOUT before including this header.
+ * @note Default value is 10 seconds.
+ */
+#ifndef MQTT_QOS2_RETRY_TIMEOUT
+#define MQTT_QOS2_RETRY_TIMEOUT 10
+#endif
+
+/**
  * @defgroup group_state state() result
  * @brief These values indicate the current PubSubClient::state() of the client.
  * @{
@@ -195,6 +205,17 @@ class PubSubClient : public Print {
     Stream* _stream{};
     int _state{MQTT_DISCONNECTED};
 
+    // QoS 2 inbound state: buffers one received message between PUBREC and PUBREL
+    uint8_t* _qos2InBuffer{};    ///< Dynamically allocated buffer: [topic\0][payload...]
+    size_t _qos2InTopicLen{};    ///< Topic string length (excluding null terminator)
+    size_t _qos2InPayloadLen{};  ///< Payload length
+    uint16_t _qos2InMsgId{};     ///< Packet Identifier of pending inbound QoS 2 message
+
+    // QoS 2 outbound state: tracks one outgoing publish through the 4-step handshake
+    uint16_t _qos2OutMsgId{};           ///< Packet Identifier of pending outbound QoS 2 message
+    uint8_t _qos2OutState{};            ///< 0=idle, 1=PUBLISH sent (awaiting PUBREC), 2=PUBREL sent (awaiting PUBCOMP)
+    unsigned long _qos2OutTimestamp{};  ///< millis() when the current outbound state was entered
+
     size_t readPacket(uint8_t* hdrLen);
     bool handlePacket(uint8_t hdrLen, size_t len);
     bool readByte(uint8_t* result);
@@ -213,6 +234,8 @@ class PubSubClient : public Print {
     // Add to buffer and flush if full (only to be used with beginPublish/endPublish)
     size_t appendBuffer(uint8_t data);
     size_t flushBuffer();
+
+    void clearQoS2State();  ///< Clear all pending QoS 2 state and free inbound buffer
 
    public:
     /**
@@ -854,7 +877,7 @@ class PubSubClient : public Print {
     /**
      * @brief Subscribes to messages published to the specified topic.
      * @param topic The topic to subscribe to.
-     * @param qos The qos to subscribe at. [0, 1].
+     * @param qos The qos to subscribe at. [0, 1, 2].
      * @return true If sending the subscribe succeeded.
      * false If sending the subscribe failed, either connection lost or message too large.
      */
@@ -865,7 +888,7 @@ class PubSubClient : public Print {
     /**
      * @brief Subscribes to messages published to the specified topic from __FlashStringHelper.
      * @param topic The topic from __FlashStringHelper to subscribe to.
-     * @param qos The qos to subscribe at. [0, 1].
+     * @param qos The qos to subscribe at. [0, 1, 2].
      * @return true If sending the subscribe succeeded.
      * false If sending the subscribe failed, either connection lost or message too large.
      */
@@ -877,7 +900,7 @@ class PubSubClient : public Print {
     /**
      * @brief Subscribes to messages published to the specified topic in PROGMEM.
      * @param topic The topic in PROGMEM to subscribe to.
-     * @param qos The qos to subscribe at. [0, 1].
+     * @param qos The qos to subscribe at. [0, 1, 2].
      * @return true If sending the subscribe succeeded.
      * false If sending the subscribe failed, either connection lost or message too large.
      */
@@ -929,6 +952,16 @@ class PubSubClient : public Print {
      * false If the client is not connected.
      */
     bool connected();
+
+    /**
+     * @brief Checks whether the outbound QoS 2 publish handshake has completed.
+     * After publishing with QoS 2, the message goes through a 4-step handshake
+     * (PUBLISH -> PUBREC -> PUBREL -> PUBCOMP). This method returns true once
+     * the handshake is complete or if no QoS 2 publish is pending.
+     * @return true If there is no pending outbound QoS 2 handshake.
+     * false If a QoS 2 publish is still in progress (awaiting PUBREC or PUBCOMP).
+     */
+    bool isPublishQoS2Complete();
 
     /**
      * @brief Returns the current state of the client.

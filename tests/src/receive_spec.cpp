@@ -29,6 +29,7 @@ int test_resize_buffer();
 int test_receive_oversized_stream_message();
 int test_receive_qos1();
 int test_receive_qos2();
+int test_receive_qos2_duplicate();
 
 void reset_callback() {
     callback_called = false;
@@ -332,7 +333,7 @@ int test_receive_qos1() {
 }
 
 int test_receive_qos2() {
-    IT("receives a qos2 message - responds PUBREC then PUBCOMP");
+    IT("receives a qos2 message - buffers on PUBLISH, delivers on PUBREL");
     reset_callback();
 
     ShimClient shimClient;
@@ -357,13 +358,8 @@ int test_receive_qos2() {
 
     rc = client.loop();
     IS_TRUE(rc);
-    IS_TRUE(callback_called);
-    IS_TRUE(strcmp(lastTopic, "topic") == 0);
-    IS_TRUE(memcmp(lastPayload, "payload", 7) == 0);
-    IS_TRUE(lastLength == 7);
+    IS_FALSE(callback_called);  // Message must NOT be delivered yet (buffered for PUBREL)
     IS_FALSE(shimClient.error());
-
-    reset_callback();
 
     // Broker sends PUBREL (0x62 = MQTTPUBREL | bit1), remaining length 2, msgId 0x1234
     byte pubrel[] = {0x62, 0x02, 0x12, 0x34};
@@ -375,7 +371,64 @@ int test_receive_qos2() {
 
     rc = client.loop();
     IS_TRUE(rc);
-    IS_FALSE(callback_called);  // callback must NOT fire again on PUBREL
+    IS_TRUE(callback_called);  // NOW the message is delivered (on PUBREL)
+    IS_TRUE(strcmp(lastTopic, "topic") == 0);
+    IS_TRUE(memcmp(lastPayload, "payload", 7) == 0);
+    IS_TRUE(lastLength == 7);
+
+    IS_FALSE(shimClient.error());
+
+    END_IT
+}
+
+int test_receive_qos2_duplicate() {
+    IT("handles duplicate qos2 PUBLISH - delivers exactly once");
+    reset_callback();
+
+    ShimClient shimClient;
+    shimClient.setAllowConnect(true);
+
+    byte connack[] = {0x20, 0x02, 0x00, 0x00};
+    shimClient.respond(connack, 4);
+
+    PubSubClient client(server, 1883, callback, shimClient);
+    bool rc = client.connect("client_test1");
+    IS_TRUE(rc);
+
+    // First QoS 2 PUBLISH
+    byte publish[] = {0x34, 0x10, 0x0, 0x5, 0x74, 0x6f, 0x70, 0x69, 0x63, 0x12, 0x34, 0x70, 0x61, 0x79, 0x6c, 0x6f, 0x61, 0x64};
+    shimClient.respond(publish, 18);
+    byte pubrec[] = {0x50, 0x02, 0x12, 0x34};
+    shimClient.expect(pubrec, 4);
+
+    rc = client.loop();
+    IS_TRUE(rc);
+    IS_FALSE(callback_called);
+    IS_FALSE(shimClient.error());
+
+    // Duplicate QoS 2 PUBLISH (same msgId 0x1234, DUP flag set: 0x3C = 0x34 | 0x08)
+    byte publish_dup[] = {0x3C, 0x10, 0x0, 0x5, 0x74, 0x6f, 0x70, 0x69, 0x63, 0x12, 0x34, 0x70, 0x61, 0x79, 0x6c, 0x6f, 0x61, 0x64};
+    shimClient.respond(publish_dup, 18);
+    byte pubrec2[] = {0x50, 0x02, 0x12, 0x34};
+    shimClient.expect(pubrec2, 4);
+
+    rc = client.loop();
+    IS_TRUE(rc);
+    IS_FALSE(callback_called);  // Must NOT deliver again (duplicate)
+    IS_FALSE(shimClient.error());
+
+    // Now complete the flow with PUBREL
+    byte pubrel[] = {0x62, 0x02, 0x12, 0x34};
+    shimClient.respond(pubrel, 4);
+    byte pubcomp[] = {0x70, 0x02, 0x12, 0x34};
+    shimClient.expect(pubcomp, 4);
+
+    rc = client.loop();
+    IS_TRUE(rc);
+    IS_TRUE(callback_called);  // Delivered exactly once
+    IS_TRUE(strcmp(lastTopic, "topic") == 0);
+    IS_TRUE(memcmp(lastPayload, "payload", 7) == 0);
+    IS_TRUE(lastLength == 7);
 
     IS_FALSE(shimClient.error());
 
@@ -393,6 +446,7 @@ int main() {
     test_receive_oversized_stream_message();
     test_receive_qos1();
     test_receive_qos2();
+    test_receive_qos2_duplicate();
 
     FINISH
 }

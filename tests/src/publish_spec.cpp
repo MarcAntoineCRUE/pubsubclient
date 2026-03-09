@@ -21,6 +21,7 @@ int test_publish_empty_topic();
 int test_publish_null_payload();
 int test_publish_qos1();
 int test_publish_qos2();
+int test_publish_qos2_handshake();
 int test_publish_P_qos1();
 int test_publish_P_qos2();
 int test_publish_FlashStringHelper();
@@ -464,6 +465,51 @@ int test_publish_qos2() {
     END_IT
 }
 
+int test_publish_qos2_handshake() {
+    IT("completes full QoS 2 publish handshake");
+    ShimClient shimClient;
+    shimClient.setAllowConnect(true);
+
+    byte connack[] = {0x20, 0x02, 0x00, 0x00};
+    shimClient.respond(connack, 4);
+
+    PubSubClient client(server, 1883, callback, shimClient);
+    bool rc = client.connect("client_test1");
+    IS_TRUE(rc);
+
+    // Publish with QoS 2 (0x34 = MQTT_PUBLISH | QoS2, msgId = 0x0002)
+    byte publish[] = {0x34, 0x10, 0x00, 0x05, 't', 'o', 'p', 'i', 'c', 0x00, 0x02, 'p', 'a', 'y', 'l', 'o', 'a', 'd'};
+    shimClient.expect(publish, sizeof(publish));
+
+    rc = client.publish("topic", "payload", MQTT_QOS2, false);
+    IS_TRUE(rc);
+    IS_FALSE(client.isPublishQoS2Complete());  // Handshake not yet complete
+
+    // Broker responds with PUBREC (msgId 0x0002)
+    byte pubrec[] = {0x50, 0x02, 0x00, 0x02};
+    shimClient.respond(pubrec, 4);
+
+    // Client should send PUBREL (0x62 = PUBREL | bit1, msgId 0x0002)
+    byte pubrel[] = {0x62, 0x02, 0x00, 0x02};
+    shimClient.expect(pubrel, 4);
+
+    rc = client.loop();
+    IS_TRUE(rc);
+    IS_FALSE(client.isPublishQoS2Complete());  // Still waiting for PUBCOMP
+
+    // Broker responds with PUBCOMP (msgId 0x0002)
+    byte pubcomp[] = {0x70, 0x02, 0x00, 0x02};
+    shimClient.respond(pubcomp, 4);
+
+    rc = client.loop();
+    IS_TRUE(rc);
+    IS_TRUE(client.isPublishQoS2Complete());  // Handshake complete
+
+    IS_FALSE(shimClient.error());
+
+    END_IT
+}
+
 int test_publish_P_qos1() {
     IT("publishes using PROGMEM payload with QoS 1 retained");
     ShimClient shimClient;
@@ -524,6 +570,7 @@ int main() {
     test_publish_retained_2();
     test_publish_qos1();
     test_publish_qos2();
+    test_publish_qos2_handshake();
     test_publish_null_payload();
     test_publish_long();
     test_publish_not_connected();

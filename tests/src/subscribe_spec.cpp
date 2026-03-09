@@ -10,6 +10,7 @@ byte server[] = {172, 16, 0, 2};
 void callback(char* topic, uint8_t* payload, size_t plength);
 int test_subscribe_no_qos();
 int test_subscribe_qos_1();
+int test_subscribe_qos_2();
 int test_subscribe_P();
 int test_subscribe_P_qos_1();
 int test_subscribe_FlashStringHelper();
@@ -67,6 +68,31 @@ int test_subscribe_qos_1() {
     shimClient.respond(suback, 5);
 
     rc = client.subscribe("topic", MQTT_QOS1);
+    IS_TRUE(rc);
+
+    IS_FALSE(shimClient.error());
+
+    END_IT
+}
+
+int test_subscribe_qos_2() {
+    IT("subscribe with QoS 2");
+    ShimClient shimClient;
+    shimClient.setAllowConnect(true);
+
+    byte connack[] = {0x20, 0x02, 0x00, 0x00};
+    shimClient.respond(connack, 4);
+
+    PubSubClient client(server, 1883, callback, shimClient);
+    bool rc = client.connect("client_test1");
+    IS_TRUE(rc);
+
+    byte subscribe[] = {0x82, 0x0a, 0x00, 0x02, 0x00, 0x05, 0x74, 0x6f, 0x70, 0x69, 0x63, 0x02};
+    shimClient.expect(subscribe, 12);
+    byte suback[] = {0x90, 0x03, 0x00, 0x02, 0x02};
+    shimClient.respond(suback, 5);
+
+    rc = client.subscribe("topic", MQTT_QOS2);
     IS_TRUE(rc);
 
     IS_FALSE(shimClient.error());
@@ -202,7 +228,7 @@ int test_subscribe_invalid_qos() {
     bool rc = client.connect("client_test1");
     IS_TRUE(rc);
 
-    rc = client.subscribe("topic", MQTT_QOS2);
+    rc = client.subscribe("topic", 3);
     IS_FALSE(rc);
     rc = client.subscribe("topic", 254);
     IS_FALSE(rc);
@@ -282,6 +308,7 @@ int main() {
     SUITE("Subscribe");
     test_subscribe_no_qos();
     test_subscribe_qos_1();
+    test_subscribe_qos_2();
     test_subscribe_P();
     test_subscribe_P_qos_1();
     test_subscribe_FlashStringHelper();
