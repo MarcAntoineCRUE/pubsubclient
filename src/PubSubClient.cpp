@@ -128,7 +128,8 @@ bool PubSubClient::connect(const char* id, const char* user, const char* pass, c
         }
 
         if (result == 1) {
-            _nextMsgId = 1;  // init msgId (packet identifier)
+            _nextMsgId = 1;    // init msgId (packet identifier)
+            _bufferWritePos = 0;  // discard any stale buffered data from a previous session
 
 #if MQTT_VERSION == MQTT_VERSION_3_1
             const uint8_t protocol[9] = {0x00, 0x06, 'M', 'Q', 'I', 's', 'd', 'p', MQTT_VERSION};
@@ -232,6 +233,7 @@ bool PubSubClient::connected() {
 void PubSubClient::disconnect() {
     DEBUG_PSC_PRINTF("disconnect called\n");
     _state = MQTT_DISCONNECTED;
+    _bufferWritePos = 0;  // discard any pending buffered data
     if (_client && _buffer) {  // guard against null buffer if allocation failed at construction
         _buffer[0] = MQTTDISCONNECT;
         _buffer[1] = 0;

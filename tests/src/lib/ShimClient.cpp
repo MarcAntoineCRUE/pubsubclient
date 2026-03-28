@@ -22,6 +22,8 @@ ShimClient::ShimClient() {
     this->expectAnything = true;
     this->_received = 0;
     this->_expectedPort = 0;
+    this->_writeFail = false;
+    this->_writeFailAfter = 0;
 }
 
 int ShimClient::connect(IPAddress ip, uint16_t port) {
@@ -57,6 +59,10 @@ int ShimClient::connect(const char *host, uint16_t port) {
     return this->_connected;
 }
 size_t ShimClient::write(uint8_t b) {
+    if (this->_writeFail) {
+        if (this->_writeFailAfter == 0) return 0;
+        this->_writeFailAfter--;
+    }
     this->_received += 1;
     TRACE(std::hex << (unsigned int)b);
     if (!this->expectAnything) {
@@ -74,6 +80,16 @@ size_t ShimClient::write(uint8_t b) {
     return 1;
 }
 size_t ShimClient::write(const uint8_t *buf, size_t size) {
+    if (this->_writeFail) {
+        if (this->_writeFailAfter == 0) return 0;
+        if (size > this->_writeFailAfter) {
+            // Partial write: only _writeFailAfter bytes go through, then fail.
+            // We don't send any of them — model all-or-nothing failure at TCP level.
+            this->_writeFailAfter = 0;
+            return 0;
+        }
+        this->_writeFailAfter -= size;
+    }
     this->_received += size;
     TRACE("[" << std::dec << (unsigned int)(size) << "] ");
     uint16_t i = 0;
@@ -159,4 +175,14 @@ void ShimClient::expectConnect(IPAddress ip, uint16_t port) {
 void ShimClient::expectConnect(const char *host, uint16_t port) {
     this->_expectedHost = host;
     this->_expectedPort = port;
+}
+
+void ShimClient::setWriteFail(size_t afterBytes) {
+    this->_writeFail = true;
+    this->_writeFailAfter = afterBytes;
+}
+
+void ShimClient::clearWriteFail() {
+    this->_writeFail = false;
+    this->_writeFailAfter = 0;
 }

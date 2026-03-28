@@ -15,6 +15,8 @@ class ShimClient : public Client {
     bool expectAnything;
     bool _error;
     uint16_t _received;
+    bool _writeFail;       // when true, write() simulates network failure
+    size_t _writeFailAfter; // fail after this many more bytes (0 = fail immediately)
     IPAddress _expectedIP;
     uint16_t _expectedPort;
     const char *_expectedHost;
@@ -45,6 +47,8 @@ class ShimClient : public Client {
 
     virtual void setAllowConnect(bool b);
     virtual void setConnected(bool b);
+    virtual void setWriteFail(size_t afterBytes);
+    virtual void clearWriteFail();
 };
 
 #endif

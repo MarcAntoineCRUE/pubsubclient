@@ -34,6 +34,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 * `write()` / `write_P()`: added upfront guard (`_buffer != nullptr && _bufferWritePos <= _bufferSize`) to prevent `size_t` underflow in the `space` calculation if the invariant was violated (e.g. after a failed flush via `appendBuffer()`)
 * `setBufferSize()`: `_bufferWritePos` is now clamped to the new buffer size after a successful reallocation, preventing out-of-bounds writes when the buffer is shrunk while a publish is in progress
 * `handlePacket()` Guard 2: relaxed `payloadOffset >= _bufferSize` to `payloadOffset > _bufferSize`, allowing a valid zero-length PUBLISH whose payload offset lands exactly at `_bufferSize`
+* `connect()` / `disconnect()`: `_bufferWritePos` is now reset to 0 on every new connection and on disconnect, discarding any stale buffered data left over from a previous (possibly failed) session
+* `ShimClient` (test harness): added `setWriteFail(afterBytes)` / `clearWriteFail()` to simulate mid-stream network write failures in unit tests
+* `publish_spec`: added three new test cases covering write-failure scenarios: flush failure during a large payload, clean recovery after a write failure followed by reconnect, and the same two scenarios for `publish_P`
 
 
 ## [3.3.0] - 2025-12-14

@@ -27,6 +27,9 @@ int test_publish_FlashStringHelper();
 int test_publish_FlashStringHelper2();
 int test_publish_P_FlashStringHelper();
 int test_publish_P_P();
+int test_publish_write_fail_during_large_payload();
+int test_publish_succeeds_after_write_failure();
+int test_publish_P_write_fail_during_large_payload();
 
 void callback(_UNUSED_ char* topic, _UNUSED_ uint8_t* payload, _UNUSED_ size_t plength) {
     // handle message arrived
@@ -516,6 +519,125 @@ int test_publish_P_qos2() {
     END_IT
 }
 
+int test_publish_write_fail_during_large_payload() {
+    IT("publish fails cleanly when network write fails during large payload flush");
+    ShimClient shimClient;
+    shimClient.setAllowConnect(true);
+
+    byte connack[] = {0x20, 0x02, 0x00, 0x00};
+    shimClient.respond(connack, 4);
+
+    PubSubClient client(server, 1883, callback, shimClient);
+    client.setBufferSize(64);
+    bool rc = client.connect("client_test1");
+    IS_TRUE(rc);
+
+    // Use a payload larger than buffer so flush will be triggered during write()
+    char payload[120];
+    memset(payload, 'A', sizeof(payload));
+    size_t plength = sizeof(payload);
+
+    rc = client.beginPublish("topic", plength, 0, false);
+    IS_TRUE(rc);
+
+    // Make write fail on the first flush attempt (after header was already sent by beginPublish)
+    shimClient.setWriteFail(0);
+
+    size_t written = client.write((uint8_t*)payload, plength);
+    // write() should report fewer bytes than requested (the part that fit before flush was needed)
+    IS_TRUE(written < plength);
+
+    // endPublish should fail since the buffer could not be fully flushed
+    rc = client.endPublish();
+    IS_FALSE(rc);
+
+    END_IT
+}
+
+int test_publish_succeeds_after_write_failure() {
+    IT("publish succeeds after a previous write failure (state not corrupted)");
+    ShimClient shimClient;
+    shimClient.setAllowConnect(true);
+
+    byte connack[] = {0x20, 0x02, 0x00, 0x00};
+    shimClient.respond(connack, 4);
+
+    PubSubClient client(server, 1883, callback, shimClient);
+    client.setBufferSize(64);
+    bool rc = client.connect("client_test1");
+    IS_TRUE(rc);
+
+    // --- First publish: force a write failure during flush ---
+    char payload1[120];
+    memset(payload1, 'B', sizeof(payload1));
+
+    rc = client.beginPublish("topic", sizeof(payload1), 0, false);
+    IS_TRUE(rc);
+
+    shimClient.setWriteFail(0);
+
+    client.write((uint8_t*)payload1, sizeof(payload1));
+    // Don't check result; we just want to trigger the failure path
+
+    client.endPublish();
+    // endPublish is expected to fail, but we discard the result
+
+    // --- Second publish: clear the failure and reconnect ---
+    shimClient.clearWriteFail();
+    // Simulate the TCP connection dropping after the write failure
+    shimClient.setConnected(false);
+    // The client lost connection due to the write failure; reconnect
+    shimClient.setAllowConnect(true);
+    shimClient.respond(connack, 4);
+
+    rc = client.connect("client_test1");
+    IS_TRUE(rc);
+
+    // Now a normal, small publish should work perfectly
+    byte publish[] = {0x30, 0x0e, 0x00, 0x05, 't', 'o', 'p', 'i', 'c', 'p', 'a', 'y', 'l', 'o', 'a', 'd'};
+    shimClient.expect(publish, sizeof(publish));
+
+    rc = client.publish("topic", "payload");
+    IS_TRUE(rc);
+
+    IS_FALSE(shimClient.error());
+
+    END_IT
+}
+
+int test_publish_P_write_fail_during_large_payload() {
+    IT("publish_P fails cleanly when network write fails during large payload flush");
+    ShimClient shimClient;
+    shimClient.setAllowConnect(true);
+
+    byte connack[] = {0x20, 0x02, 0x00, 0x00};
+    shimClient.respond(connack, 4);
+
+    PubSubClient client(server, 1883, callback, shimClient);
+    client.setBufferSize(64);
+    bool rc = client.connect("client_test1");
+    IS_TRUE(rc);
+
+    // Use a PROGMEM payload larger than buffer
+    char payload[120];
+    memset(payload, 'C', sizeof(payload));
+    size_t plength = sizeof(payload);
+
+    rc = client.beginPublish("topic", plength, 0, false);
+    IS_TRUE(rc);
+
+    // Make write fail on the first flush attempt
+    shimClient.setWriteFail(0);
+
+    size_t written = client.write_P((uint8_t*)payload, plength);
+    IS_TRUE(written < plength);
+
+    rc = client.endPublish();
+    IS_FALSE(rc);
+
+    END_IT
+}
+
 int main() {
     SUITE("Publish");
     test_publish();
@@ -537,6 +659,9 @@ int main() {
     test_publish_FlashStringHelper2();
     test_publish_P_FlashStringHelper();
     test_publish_P_P();
+    test_publish_write_fail_during_large_payload();
+    test_publish_succeeds_after_write_failure();
+    test_publish_P_write_fail_during_large_payload();
 
     FINISH
 }
